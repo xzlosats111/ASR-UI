@@ -12,7 +12,7 @@ internal enum SubtitlePreset
 
 internal sealed class MainForm : Form
 {
-    private readonly AppSettings _settings = AppSettings.Load();
+    private readonly AppSettings _settings;
     private readonly Dictionary<string, Panel> _pages = new();
     private readonly Dictionary<string, Button> _navButtons = new();
     private readonly Color _navColor = Color.FromArgb(23, 32, 52);
@@ -31,18 +31,22 @@ internal sealed class MainForm : Form
     private readonly RichTextBox _componentDetails = new() { ReadOnly = true, BorderStyle = BorderStyle.FixedSingle };
     private readonly CheckBox _useProxy = new() { Text = "下载和模型自动下载使用 HTTP 代理" };
     private readonly TextBox _proxyUrl = new();
+    private readonly TextBox _modelDirectory = new();
     private Button _downloadButton = null!;
     private readonly ProgressBar _downloadProgress = new();
     private readonly Label _downloadStatus = new() { AutoSize = false };
 
     private readonly RichTextBox _log = new() { ReadOnly = true, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Consolas", 9F) };
 
-    public MainForm()
+    public MainForm(AppSettings settings)
     {
-        Text = "ASR-UI · 日语字幕工作台";
+        _settings = settings;
+        AppPaths.ConfigureModelDirectory(_settings.ModelDirectory);
+        AppPaths.EnsureDirectories();
+        Text = "ASR-UI v0.1.1 · 日语字幕工作台";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(1050, 720);
-        Size = new Size(1180, 820);
+        MinimumSize = new Size(1180, 820);
+        Size = new Size(1280, 900);
         Font = new Font("Microsoft YaHei UI", 9F);
         BackColor = _pageColor;
 
@@ -57,8 +61,10 @@ internal sealed class MainForm : Form
         AddPage(host, "log", BuildLogPage());
         ShowPage("subtitle");
 
-        AppendLog("ASR-UI 已启动。首次使用请先打开“组件与下载”下载默认勾选项目。");
+        Shown += (_, _) => EnsureComponentListFitsScreen();
+        AppendLog("ASR-UI v0.1.1 已启动。首次使用请先打开“组件与下载”下载默认勾选项目。");
         AppendLog($"工作目录：{AppPaths.BaseDirectory}");
+        AppendLog($"模型目录：{AppPaths.ModelDirectory}");
     }
 
     private Panel BuildNavigation()
@@ -134,7 +140,11 @@ internal sealed class MainForm : Form
             button.BackColor = name == key ? _accentColor : _navColor;
             button.Font = new Font("Microsoft YaHei UI", 9F, name == key ? FontStyle.Bold : FontStyle.Regular);
         }
-        if (key == "components") RefreshComponentDetails();
+        if (key == "components")
+        {
+            RefreshComponentDetails();
+            EnsureComponentListFitsScreen();
+        }
     }
 
     private Control BuildSubtitlePage()
@@ -211,10 +221,10 @@ internal sealed class MainForm : Form
 
     private Control BuildComponentsPage()
     {
-        var root = new TableLayoutPanel { ColumnCount = 1, RowCount = 4, Dock = DockStyle.Fill, BackColor = _pageColor };
+        var root = new TableLayoutPanel { ColumnCount = 1, RowCount = 4, Dock = DockStyle.Fill, BackColor = _pageColor, AutoScroll = true };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 86));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 126));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 74));
         root.Controls.Add(TitleBlock("组件与下载", "默认勾选约 3.4 GiB。模型和运行时直接由本程序从上游下载，不进入 Git 仓库，也不会被推送到 GitHub。"), 0, 0);
 
@@ -222,6 +232,8 @@ internal sealed class MainForm : Form
         _components.Dock = DockStyle.Fill;
         _components.BorderStyle = BorderStyle.FixedSingle;
         _components.Font = new Font("Microsoft YaHei UI", 10F);
+        _components.IntegralHeight = false;
+        _components.ItemHeight = 34;
         for (var i = 0; i < ComponentCatalog.All.Count; i++)
         {
             var c = ComponentCatalog.All[i];
@@ -240,14 +252,22 @@ internal sealed class MainForm : Form
 
         var proxyCard = Card();
         _useProxy.Checked = _settings.UseProxy;
-        _useProxy.Location = new Point(18, 17);
+        _useProxy.Location = new Point(18, 12);
         _useProxy.AutoSize = true;
-        var proxyLabel = new Label { Text = "代理地址", AutoSize = true, Location = new Point(18, 50) };
+        var proxyLabel = new Label { Text = "代理地址", AutoSize = true, Location = new Point(18, 42) };
         _proxyUrl.Text = _settings.ProxyUrl;
-        _proxyUrl.Location = new Point(82, 46);
+        _proxyUrl.Location = new Point(82, 38);
         _proxyUrl.Width = 280;
-        var proxyHint = new Label { Text = "默认：http://127.0.0.1:10809。取消勾选可改为直连。", AutoSize = true, ForeColor = Color.DimGray, Location = new Point(380, 50) };
-        proxyCard.Controls.AddRange(new Control[] { _useProxy, proxyLabel, _proxyUrl, proxyHint });
+        var proxyHint = new Label { Text = "默认：http://127.0.0.1:10809。取消勾选可改为直连。", AutoSize = true, ForeColor = Color.DimGray, Location = new Point(380, 42) };
+        var modelLabel = new Label { Text = "模型保存目录", AutoSize = true, Location = new Point(18, 78) };
+        _modelDirectory.Text = AppPaths.ModelDirectory;
+        _modelDirectory.Location = new Point(110, 74);
+        _modelDirectory.Width = 540;
+        var modelBrowse = SecondaryButton("选择目录");
+        modelBrowse.Location = new Point(665, 70);
+        modelBrowse.Click += (_, _) => ChooseModelDirectory();
+        var modelHint = new Label { Text = "可以放到空间更大的磁盘；切换后新下载模型将保存到该目录。", AutoSize = true, ForeColor = Color.DimGray, Location = new Point(18, 104) };
+        proxyCard.Controls.AddRange(new Control[] { _useProxy, proxyLabel, _proxyUrl, proxyHint, modelLabel, _modelDirectory, modelBrowse, modelHint });
         root.Controls.Add(proxyCard, 0, 2);
 
         var action = new Panel { Dock = DockStyle.Fill, BackColor = _pageColor };
@@ -358,11 +378,60 @@ internal sealed class MainForm : Form
         }
     }
 
+    private void ChooseModelDirectory()
+    {
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = "选择模型保存目录（建议选择空间充足的磁盘）",
+            SelectedPath = Directory.Exists(_modelDirectory.Text) ? _modelDirectory.Text : AppPaths.ModelDirectory
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        AppPaths.ConfigureModelDirectory(dialog.SelectedPath);
+        AppPaths.EnsureDirectories();
+        _modelDirectory.Text = AppPaths.ModelDirectory;
+        SaveSettings();
+        RefreshComponentList();
+        RefreshComponentDetails();
+        AppendLog($"模型保存目录已切换为：{AppPaths.ModelDirectory}");
+    }
+
+    private bool ApplyModelDirectory()
+    {
+        try
+        {
+            AppPaths.ConfigureModelDirectory(_modelDirectory.Text);
+            AppPaths.EnsureDirectories();
+            _modelDirectory.Text = AppPaths.ModelDirectory;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, "模型保存目录无法使用：\n" + ex.Message, "模型目录错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+    }
+
+    private void EnsureComponentListFitsScreen()
+    {
+        if (!IsHandleCreated || _components.Items.Count == 0) return;
+        // Keep every currently known component visible on normal displays. On a very
+        // small display the component page itself scrolls, rather than clipping controls.
+        var componentListHeight = _components.Items.Count * _components.ItemHeight + 18;
+        var desiredClientHeight = 84 + Math.Max(360, componentListHeight) + 126 + 74 + 34;
+        var windowChrome = Height - ClientSize.Height;
+        var desiredHeight = desiredClientHeight + windowChrome;
+        var workArea = Screen.FromControl(this).WorkingArea;
+        var maximumHeight = Math.Max(620, workArea.Height - 32);
+        var targetHeight = Math.Min(desiredHeight, maximumHeight);
+        if (Height < targetHeight) Height = targetHeight;
+        _components.IntegralHeight = false;
+    }
+
     private void RefreshComponentDetails()
     {
         if (_components.SelectedIndex < 0) return;
         var c = ComponentCatalog.All[_components.SelectedIndex];
-        _componentDetails.Text = $"名称：{c.Title}\n大小：{c.Size}\n已安装：{(c.IsInstalled() ? "是" : "否")}\n\n用途说明：\n{c.Description}\n\n上游来源：\n{c.Source}\n\n许可证 / 提示：\n{c.License}\n\n下载地址：\n{c.Url}";
+        _componentDetails.Text = $"名称：{c.Title}\n大小：{c.Size}\n已安装：{(c.IsInstalled() ? "是" : "否")}\n\n模型/下载保存位置：\n{c.TargetPath}\n\n用途说明：\n{c.Description}\n\n上游来源：\n{c.Source}\n\n许可证 / 提示：\n{c.License}\n\n下载地址：\n{c.Url}";
     }
 
     private string FormatComponent(ComponentDefinition c) => $"{c.Title}  ·  {c.Size}{(c.IsInstalled() ? "  [已安装]" : "")}";
@@ -384,6 +453,7 @@ internal sealed class MainForm : Form
             return;
         }
 
+        if (!ApplyModelDirectory()) return;
         SaveSettings();
         _downloadButton.Enabled = false;
         _downloadProgress.Style = ProgressBarStyle.Marquee;
@@ -403,7 +473,11 @@ internal sealed class MainForm : Form
                 try
                 {
                     var progress = new Progress<(long downloaded, long? total)>(p => UpdateDownloadProgress(component, p.downloaded, p.total));
-                    await service.DownloadAsync(component, _useProxy.Checked, _proxyUrl.Text.Trim(), progress, CancellationToken.None);
+                    await service.DownloadAsync(component, _useProxy.Checked, _proxyUrl.Text.Trim(), progress, message =>
+                    {
+                        AppendLog(message);
+                        _downloadStatus.Text = message;
+                    }, CancellationToken.None);
                     AppendLog($"组件安装完成：{component.Title}");
                 }
                 catch (Exception ex)
@@ -492,6 +566,7 @@ internal sealed class MainForm : Form
             return;
         }
 
+        if (!ApplyModelDirectory()) return;
         SaveSettings();
         _startButton.Enabled = false;
         _subtitleStatus.Text = "任务正在运行，请查看“运行日志”。";
@@ -629,6 +704,7 @@ internal sealed class MainForm : Form
         _settings.ProxyUrl = _proxyUrl.Text.Trim();
         _settings.OutputBesideSource = _sourceOutput.Checked;
         _settings.OutputFolder = _outputFolder.Text.Trim();
+        _settings.ModelDirectory = AppPaths.ModelDirectory;
         _settings.Save();
     }
 

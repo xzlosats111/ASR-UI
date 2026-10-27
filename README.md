@@ -18,6 +18,8 @@ Qwen 和 Parakeet 使用同一个 CrispASR CUDA 运行时，因此不需要再�
 
 - **一页只做一件事**：日语字幕、组件下载、完整旧版、运行日志四个页面；
 - **默认可用**：默认启用 `http://127.0.0.1:10809` HTTP 代理；可一键关闭改为直连；
+- **模型目录可选**：可把模型切换到空间更大的磁盘；路径会保存，下次启动继续使用；
+- **大文件断点续传**：Hugging Face / Xet 下载中断时保留 `.part` 文件，自动最多重试 5 次并用 Range 续传；仍失败时会调用 Windows 自带 `curl.exe` 再次续传；
 - **下载内容说清楚**：每个组件都显示用途、大小、上游来源、许可证和安装状态；
 - **批量不因一个文件中断**：任何转换或识别失败都会记录原因并继续后面的文件；
 - **不覆盖 A/B 结果**：Qwen 和 Parakeet 各自使用不同 SRT 后缀；
@@ -54,10 +56,13 @@ Qwen 和 Parakeet 使用同一个 CrispASR CUDA 运行时，因此不需要再�
 src/AsrUi/                         新的独立中文 WinForms 工作台
 legacy/WhisperDesktopSource/       已保留的 WhisperDesktop v3 源码与功能
 .github/workflows/build.yml        同时构建新 GUI 和完整旧版，打包成一个 artifact
-推送到ASR-UI.cmd                     走 127.0.0.1:10809 推送到本仓库
+push-asr-ui.cmd                      常规 ASCII 推送脚本，走 127.0.0.1:10809
+推送到ASR-UI.cmd                     同一脚本的中文文件名入口
+scripts/PublishCleanSource.ps1       全量源码覆盖后使用的干净重建/推送工具
+scripts/PublishCleanSource.cmd       上一工具的 ASCII CMD 入口
 ```
 
-若从源码 ZIP 解压而不是 Git 克隆，直接在根目录运行 `推送到ASR-UI.cmd` 即可：它会在没有 `.git` 时初始化本地 Git、配置代理、把远端设为 `https://github.com/xzlosats111/ASR-UI.git`、使用 `main` 分支并推送。首次使用 Git 的电脑需要先配置一次 `user.name` 和 `user.email`；脚本会在缺少时给出命令。
+若从源码 ZIP 解压而不是 Git 克隆，根目录 `push-asr-ui.cmd` 会在没有 `.git` 时初始化本地 Git、配置代理、把远端设为 `https://github.com/xzlosats111/ASR-UI.git`、使用 `main` 分支并推送。若曾误加入 artifact、模型、EXE 或大文件，请改用 `scripts\PublishCleanSource.cmd`：它会以远端 `main` 为索引基准重新暂存源码，遵守 `.gitignore`，并自动排除任何大于 5 MiB 的误暂存文件。首次使用 Git 的电脑需要先配置一次 `user.name` 和 `user.email`。
 
 ## 构建
 

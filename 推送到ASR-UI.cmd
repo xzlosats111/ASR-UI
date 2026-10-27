@@ -22,7 +22,7 @@ if not exist "%ROOT%\.git" (
   if errorlevel 1 goto :failed
 )
 
-echo [1/4] Configuring proxy and remote...
+echo [1/5] Configuring proxy and remote...
 git config http.proxy "%PROXY_URL%"
 git config http.version HTTP/1.1
 git config http.postBuffer 524288000
@@ -37,22 +37,55 @@ if errorlevel 1 goto :no_identity
 git config user.email >nul 2>nul
 if errorlevel 1 goto :no_identity
 
-echo [2/4] Staging source files...
+echo [2/5] Staging source files...
 git add -A
 if errorlevel 1 goto :failed
 
-echo [3/4] Creating commit when needed...
+echo [3/5] Creating commit when needed...
 git diff --cached --quiet
 if errorlevel 1 goto :commit
 echo No source changes to commit.
-goto :push
+goto :reconcile
 
 :commit
-git commit -m "Initial ASR-UI workbench with Qwen and Parakeet"
+git commit -m "Update ASR-UI workbench"
 if errorlevel 1 goto :failed
 
+:reconcile
+echo [4/5] Checking remote main history...
+git fetch origin main >nul 2>nul
+if errorlevel 1 goto :push
+git show-ref --verify --quiet refs/remotes/origin/main
+if errorlevel 1 goto :push
+
+git merge-base --is-ancestor origin/main HEAD
+if not errorlevel 1 goto :push
+
+git merge-base --is-ancestor HEAD origin/main
+if not errorlevel 1 goto :rebase
+
+echo Local and remote histories are unrelated.
+echo Rebuilding the local update on top of remote main without force-push...
+git reset --soft origin/main
+if errorlevel 1 goto :failed
+git add -A
+if errorlevel 1 goto :failed
+git diff --cached --quiet
+if errorlevel 1 goto :commit_rebased
+goto :push
+
+:commit_rebased
+git commit -m "Update ASR-UI workbench"
+if errorlevel 1 goto :failed
+goto :push
+
+:rebase
+echo Local branch is behind remote main. Rebasing local commit...
+git rebase origin/main
+if errorlevel 1 goto :rebase_failed
+
 :push
-echo [4/4] Pushing main to GitHub...
+echo [5/5] Pushing main to GitHub...
 git branch -M main
 git push -u origin main
 if errorlevel 1 goto :push_failed
@@ -72,6 +105,13 @@ echo ERROR: Git author name/email is not configured.
 echo Run these once, then retry:
 echo   git config --global user.name "Your Name"
 echo   git config --global user.email "you@example.com"
+pause
+exit /b 1
+
+:rebase_failed
+echo REBASE FAILED. No force-push was performed.
+echo Run: git rebase --abort
+echo Then send a screenshot of the full output.
 pause
 exit /b 1
 

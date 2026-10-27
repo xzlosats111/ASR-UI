@@ -1,7 +1,27 @@
-# Build artifacts
+# Build artifacts and downloaded application packages. Never commit generated binaries.
 [Bb]in/
 [Oo]bj/
-artifacts/
+[Aa]rtifacts/
+[Dd]ist/
+[Oo]ut/
+ASR-UI-win-x64/
+ASR-UI-win-x64.zip
+*.exe
+*.dll
+*.pdb
+*.lib
+*.exp
+*.obj
+*.zip
+*.7z
+*.rar
+*.msi
+*.nupkg
+*.whl
+*.gguf
+*.bin
+*.safetensors
+*.part
 *.user
 *.suo
 .vs/
@@ -12,7 +32,10 @@ runtime/
 models/
 cache/
 
-# Legacy source build outputs
+# Legacy Visual Studio build outputs
 legacy/WhisperDesktopSource/build/
 legacy/WhisperDesktopSource/out/
+legacy/WhisperDesktopSource/x64/
+legacy/WhisperDesktopSource/**/x64/
+legacy/WhisperDesktopSource/**/Release/
 legacy/WhisperDesktopSource/.vs/

@@ -8,9 +8,18 @@ internal static class AppPaths
     public static string DataDirectory => Path.Combine(BaseDirectory, "data");
     public static string DownloadDirectory => Path.Combine(DataDirectory, "downloads");
     public static string RuntimeDirectory => Path.Combine(BaseDirectory, "runtime");
-    public static string ModelDirectory => Path.Combine(BaseDirectory, "models");
+    public static string DefaultModelDirectory => Path.Combine(BaseDirectory, "models");
+    private static string _modelDirectory = DefaultModelDirectory;
+    public static string ModelDirectory => _modelDirectory;
     public static string CacheDirectory => Path.Combine(BaseDirectory, "cache");
     public static string SettingsFile => Path.Combine(DataDirectory, "settings.json");
+
+    public static void ConfigureModelDirectory(string? directory)
+    {
+        _modelDirectory = string.IsNullOrWhiteSpace(directory)
+            ? DefaultModelDirectory
+            : Path.GetFullPath(directory.Trim());
+    }
 
     public static void EnsureDirectories()
     {
@@ -50,6 +59,7 @@ internal sealed class AppSettings
     public string ProxyUrl { get; set; } = "http://127.0.0.1:10809";
     public bool OutputBesideSource { get; set; } = true;
     public string OutputFolder { get; set; } = string.Empty;
+    public string ModelDirectory { get; set; } = string.Empty;
 
     public static AppSettings Load()
     {
