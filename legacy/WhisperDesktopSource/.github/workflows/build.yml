@@ -1,0 +1,128 @@
+name: Build Japanese SRT Tool
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+  release:
+    types: [ published ]
+
+permissions:
+  contents: write
+
+env:
+  SOLUTION: WhisperCpp.sln
+  CONFIGURATION: Release
+  PLATFORM: x64
+  DOTNET_VERSION: 10.0.x
+
+jobs:
+  build:
+    name: Build Japanese SRT Tool (Release x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup .NET SDK (for CompressShaders tool)
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v3
+        with:
+          vs-version: 'latest'
+
+      - name: Build ComputeShaders project
+        shell: pwsh
+        run: msbuild ComputeShaders\ComputeShaders.vcxproj /p:Configuration=${{ env.CONFIGURATION }} /p:Platform=x64 /m /v:m
+
+      - name: Run CompressShaders tool
+        shell: pwsh
+        run: dotnet run --project Tools\CompressShaders\CompressShaders.csproj -c Release
+
+      - name: Build WhisperDesktop and main examples
+        shell: pwsh
+        run: >
+          msbuild ${{ env.SOLUTION }}
+          /p:Configuration=${{ env.CONFIGURATION }} /p:Platform=x64 /m /v:m
+          '/t:Examples\WhisperDesktop;Examples\main'
+          /p:BuildProjectReferences=true
+
+      - name: Collect binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = "${{ github.workspace }}\artifacts"
+          New-Item -ItemType Directory -Force -Path "$out\WhisperDesktop", "$out\main" | Out-Null
+
+          function Find-Binary( [string] $name ) {
+            $found = Get-ChildItem -Path "${{ github.workspace }}" -Recurse -Filter $name |
+              Where-Object { $_.FullName -notlike "*\artifacts\*" } |
+              Select-Object -First 1
+            if( $null -eq $found ) { throw "$name not found" }
+            return $found.FullName
+          }
+
+          Copy-Item ( Find-Binary 'WhisperDesktop.exe' ) "$out\WhisperDesktop\"
+          Copy-Item "README_简体中文.md" "$out\WhisperDesktop\使用说明_简体中文.md"
+          # Keep the original full WhisperDesktop UI and add a simple companion
+          # for Qwen Anime / Parakeet Japanese SRT plus graphical upstream downloads.
+          Copy-Item -Path "Tools\JapaneseSubtitleHub" -Destination "$out\WhisperDesktop\" -Recurse -Force
+          Copy-Item ( Find-Binary 'main.exe' ) "$out\main\"
+          Copy-Item "Examples\main\Readme.txt" "$out\main\"
+
+          $whisperDll = Find-Binary 'Whisper.dll'
+          Copy-Item $whisperDll "$out\WhisperDesktop\"
+          Copy-Item $whisperDll "$out\main\"
+
+          # Media Foundation does not normally support FLV. Bundle a self-contained
+          # LGPL FFmpeg executable for the application's FLV -> temporary WAV fallback.
+          $ffmpegZip = Join-Path $env:RUNNER_TEMP 'ffmpeg-win64-lgpl.zip'
+          $ffmpegExtract = Join-Path $env:RUNNER_TEMP 'ffmpeg-win64-lgpl'
+          Invoke-WebRequest -Uri 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip' -OutFile $ffmpegZip
+          Expand-Archive -Path $ffmpegZip -DestinationPath $ffmpegExtract -Force
+          $ffmpeg = Get-ChildItem -Path $ffmpegExtract -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
+          if( $null -eq $ffmpeg ) { throw 'ffmpeg.exe not found in the downloaded FFmpeg archive' }
+          Copy-Item $ffmpeg.FullName "$out\WhisperDesktop\ffmpeg.exe"
+          $ffmpegLicense = Get-ChildItem -Path $ffmpegExtract -Recurse -File |
+            Where-Object { $_.Name -match '^(LICENSE|COPYING)' } | Select-Object -First 1
+          if( $null -ne $ffmpegLicense ) { Copy-Item $ffmpegLicense.FullName "$out\WhisperDesktop\FFmpeg-LICENSE.txt" }
+
+          Write-Host "=== Collected files ==="
+          Get-ChildItem $out -Recurse -File | Select-Object FullName, Length
+
+      - name: Upload WhisperDesktop artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: WhisperDesktop-x64
+          path: artifacts/WhisperDesktop/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload main artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: main-x64
+          path: artifacts/main/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Package for release
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Compress-Archive -Path "artifacts\WhisperDesktop\*" -DestinationPath "WhisperDesktop.zip" -Force
+          Compress-Archive -Path "artifacts\main\*" -DestinationPath "main.zip" -Force
+          Get-Item "WhisperDesktop.zip", "main.zip" | Select-Object Name, Length
+
+      - name: Attach binaries to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            WhisperDesktop.zip
+            main.zip

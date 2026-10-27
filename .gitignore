@@ -1,0 +1,18 @@
+# Build artifacts
+[Bb]in/
+[Oo]bj/
+artifacts/
+*.user
+*.suo
+.vs/
+
+# Runtime downloads and local settings - never commit models, engines, cache or proxy settings.
+data/
+runtime/
+models/
+cache/
+
+# Legacy source build outputs
+legacy/WhisperDesktopSource/build/
+legacy/WhisperDesktopSource/out/
+legacy/WhisperDesktopSource/.vs/

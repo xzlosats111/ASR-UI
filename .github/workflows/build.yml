@@ -1,0 +1,123 @@
+name: Build ASR-UI for Windows
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+  release:
+    types: [ published ]
+
+permissions:
+  contents: write
+
+env:
+  LEGACY_ROOT: legacy/WhisperDesktopSource
+  CONFIGURATION: Release
+  PLATFORM: x64
+
+jobs:
+  build:
+    name: Build ASR-UI and Legacy WhisperDesktop (x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 for legacy shader compression tool
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Setup .NET 8 for ASR-UI
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: latest
+
+      - name: Build legacy ComputeShaders project
+        shell: pwsh
+        working-directory: ${{ env.LEGACY_ROOT }}
+        run: msbuild ComputeShaders\ComputeShaders.vcxproj /p:Configuration=${{ env.CONFIGURATION }} /p:Platform=${{ env.PLATFORM }} /m /v:m
+
+      - name: Run legacy CompressShaders tool
+        shell: pwsh
+        working-directory: ${{ env.LEGACY_ROOT }}
+        run: dotnet run --project Tools\CompressShaders\CompressShaders.csproj -c Release
+
+      - name: Build legacy WhisperDesktop and main example
+        shell: pwsh
+        working-directory: ${{ env.LEGACY_ROOT }}
+        run: >
+          msbuild WhisperCpp.sln
+          /p:Configuration=${{ env.CONFIGURATION }} /p:Platform=${{ env.PLATFORM }} /m /v:m
+          '/t:Examples\WhisperDesktop;Examples\main'
+          /p:BuildProjectReferences=true
+
+      - name: Publish new ASR-UI
+        shell: pwsh
+        run: >
+          dotnet publish src\AsrUi\AsrUi.csproj
+          -c Release -r win-x64 --self-contained true
+          -o artifacts\ASR-UI
+
+      - name: Collect legacy binaries and FFmpeg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = "${{ github.workspace }}\artifacts\ASR-UI"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          function Find-LegacyBinary( [string] $name ) {
+            $found = Get-ChildItem -Path "${{ github.workspace }}\${{ env.LEGACY_ROOT }}" -Recurse -Filter $name |
+              Where-Object { $_.FullName -notlike "*\artifacts\*" } |
+              Select-Object -First 1
+            if( $null -eq $found ) { throw "$name not found" }
+            return $found.FullName
+          }
+
+          Copy-Item (Find-LegacyBinary 'WhisperDesktop.exe') $out
+          Copy-Item (Find-LegacyBinary 'Whisper.dll') $out
+          Copy-Item (Find-LegacyBinary 'main.exe') $out
+          Copy-Item "README.md" "$out\使用说明_简体中文.md"
+          Copy-Item "legacy\WhisperDesktopSource\LICENSE" "$out\WhisperDesktop-LICENSE.txt"
+
+          # The same LGPL sidecar supports both ASR-UI media conversion and
+          # the retained WhisperDesktop v3 FLV fallback.
+          $ffmpegZip = Join-Path $env:RUNNER_TEMP 'ffmpeg-win64-lgpl.zip'
+          $ffmpegExtract = Join-Path $env:RUNNER_TEMP 'ffmpeg-win64-lgpl'
+          Invoke-WebRequest -Uri 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip' -OutFile $ffmpegZip
+          Expand-Archive -LiteralPath $ffmpegZip -DestinationPath $ffmpegExtract -Force
+          $ffmpeg = Get-ChildItem -Path $ffmpegExtract -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
+          if( $null -eq $ffmpeg ) { throw 'ffmpeg.exe not found in the downloaded FFmpeg archive' }
+          Copy-Item $ffmpeg.FullName "$out\ffmpeg.exe"
+          $ffmpegLicense = Get-ChildItem -Path $ffmpegExtract -Recurse -File | Where-Object { $_.Name -match '^(LICENSE|COPYING)' } | Select-Object -First 1
+          if( $null -ne $ffmpegLicense ) { Copy-Item $ffmpegLicense.FullName "$out\FFmpeg-LICENSE.txt" }
+
+          Write-Host '=== Published files ==='
+          Get-ChildItem $out -Recurse -File | Select-Object FullName, Length
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ASR-UI-win-x64
+          path: artifacts/ASR-UI/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Package release archive
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Compress-Archive -Path "artifacts\ASR-UI\*" -DestinationPath "ASR-UI-win-x64.zip" -Force
+
+      - name: Attach release archive
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ASR-UI-win-x64.zip

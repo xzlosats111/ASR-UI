@@ -1,0 +1,3 @@
+# The vendored legacy Visual Studio tree intentionally retains its upstream CRLF files.
+legacy/** -whitespace
+*.cmd -whitespace
