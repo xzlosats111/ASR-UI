@@ -6,7 +6,7 @@ set "TARGET=%USERPROFILE%\Desktop\ASR-UI"
 
 echo.
 echo ================================================================
-echo  Apply complete clean ASR-UI source and rebuild on Actions
+echo  Apply complete ASR-UI v0.1.3 source and rebuild on Actions
 echo ================================================================
 echo Update folder: %UPDATE_DIR%
 echo Target folder: %TARGET%
@@ -30,7 +30,7 @@ set "PUSH_EXIT=%ERRORLEVEL%"
 if not "%PUSH_EXIT%"=="0" goto :push_failed
 
 echo.
-echo SUCCESS. GitHub Actions will now rebuild ASR-UI from clean source.
+echo SUCCESS. GitHub Actions will now rebuild ASR-UI v0.1.3 from source.
 pause
 exit /b 0
 

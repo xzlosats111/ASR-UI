@@ -43,7 +43,7 @@ internal sealed class MainForm : Form
         _settings = settings;
         AppPaths.ConfigureModelDirectory(_settings.ModelDirectory);
         AppPaths.EnsureDirectories();
-        Text = "ASR-UI v0.1.1 · 日语字幕工作台";
+        Text = "ASR-UI v0.1.3 · 日语字幕工作台";
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(1180, 820);
         Size = new Size(1280, 900);
@@ -62,7 +62,7 @@ internal sealed class MainForm : Form
         ShowPage("subtitle");
 
         Shown += (_, _) => EnsureComponentListFitsScreen();
-        AppendLog("ASR-UI v0.1.1 已启动。首次使用请先打开“组件与下载”下载默认勾选项目。");
+        AppendLog("ASR-UI v0.1.3 已启动。首次使用请先打开“组件与下载”下载默认勾选项目。");
         AppendLog($"工作目录：{AppPaths.BaseDirectory}");
         AppendLog($"模型目录：{AppPaths.ModelDirectory}");
     }
@@ -623,7 +623,7 @@ internal sealed class MainForm : Form
             };
             var baseName = Path.Combine(outputDirectory, Path.GetFileNameWithoutExtension(input) + suffix);
             var arguments = isQwen
-                ? new[] { "--backend", "qwen3-ja-anime", "-m", qwenModel.TargetPath, "-am", ComponentCatalog.QwenAlignerQ4.TargetPath, "--gpu-backend", "cuda", "-f", tempWav, "-l", "ja", "--vad", "--split-on-punct", "-osrt", "-of", baseName }
+                ? new[] { "--backend", "qwen3", "-m", qwenModel.TargetPath, "-am", ComponentCatalog.QwenAlignerQ4.TargetPath, "--gpu-backend", "cuda", "-f", tempWav, "-l", "ja", "--vad", "--split-on-punct", "-osrt", "-of", baseName }
                 : new[] { "--backend", "parakeet", "-m", ComponentCatalog.ParakeetJaQ8.TargetPath, "--gpu-backend", "cuda", "-f", tempWav, "-l", "ja", "--vad", "--split-on-punct", "--parakeet-decoder", "ctc", "-osrt", "-of", baseName };
             await RunProcessAsync(crisp, arguments, BuildEngineEnvironment());
             var srt = baseName + ".srt";

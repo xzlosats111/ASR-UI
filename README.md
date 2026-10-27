@@ -12,7 +12,7 @@
 | **快速** | CrispASR CUDA 12.6 legacy + Parakeet Japanese Q8_0 | 原生时间码 | 快速批量出日语 SRT | `文件名.parakeet-ja.srt` |
 | **完整旧版** | 保留的 WhisperDesktop v3 + Whisper large-v3 Q5_0（可选） | Whisper 分段 | 需要完整原有功能时 | 原程序决定 |
 
-Qwen 和 Parakeet 使用同一个 CrispASR CUDA 运行时，因此不需要再额外装 Python、PyTorch、CUDA Toolkit 或另一个 speech.cpp 运行时。
+Qwen 和 Parakeet 使用同一个 CrispASR CUDA 运行时，因此不需要再额外装 Python、PyTorch、CUDA Toolkit 或另一个 speech.cpp 运行时。Qwen Anime/Galgame 是模型预设名称，运行时实际使用 CrispASR 的 `qwen3` 后端。
 
 ## 新 UI 的设计原则
 
