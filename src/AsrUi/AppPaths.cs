@@ -12,8 +12,12 @@ internal static class AppPaths
     private static string _modelDirectory = DefaultModelDirectory;
     public static string ModelDirectory => _modelDirectory;
     public static string CacheDirectory => Path.Combine(BaseDirectory, "cache");
-    // CrispASR v0.8.45's Windows SRT writer is not reliably Unicode-path safe.
-    // Keep its short ASCII temporary output inside the application cache, then copy via .NET.
+    // Every conversion/transcription job receives one owned workspace below this directory.
+    // Do not use Path.GetTempPath(): that scatters multi-gigabyte WAV files in the Windows user temp folder.
+    public static string JobDirectory => Path.Combine(CacheDirectory, "jobs");
+    // Persistent engine cache, separated from disposable per-file workspaces.
+    public static string CrispAsrCacheDirectory => Path.Combine(CacheDirectory, "crispasr");
+    // Legacy v0.1.4-v0.1.6 staging location. New jobs stage inside JobDirectory instead.
     public static string OutputStagingDirectory => Path.Combine(CacheDirectory, "output");
     public static string SettingsFile => Path.Combine(DataDirectory, "settings.json");
 
@@ -26,8 +30,58 @@ internal static class AppPaths
 
     public static void EnsureDirectories()
     {
-        foreach (var path in new[] { DataDirectory, DownloadDirectory, RuntimeDirectory, ModelDirectory, CacheDirectory, OutputStagingDirectory })
+        foreach (var path in new[] { DataDirectory, DownloadDirectory, RuntimeDirectory, ModelDirectory, CacheDirectory, JobDirectory, CrispAsrCacheDirectory, OutputStagingDirectory })
             Directory.CreateDirectory(path);
+    }
+
+    /// <summary>
+    /// Remove only abandoned per-job workspaces. A live job keeps .active open with FileShare.None,
+    /// so a second ASR-UI instance cannot mistake it for garbage. Download .part files are deliberately
+    /// excluded: they are resumable downloads, not disposable conversion temp files.
+    /// </summary>
+    public static int CleanupOrphanedWorkspaces()
+    {
+        var removed = 0;
+        if (Directory.Exists(JobDirectory))
+        {
+            foreach (var directory in Directory.EnumerateDirectories(JobDirectory, "job-*", SearchOption.TopDirectoryOnly))
+            {
+                try
+                {
+                    var leasePath = Path.Combine(directory, ".active");
+                    using var probe = new FileStream(leasePath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                    probe.Dispose();
+                    TemporaryJobWorkspace.TryDeleteDirectory(directory);
+                    removed++;
+                }
+                catch
+                {
+                    // The directory belongs to a live ASR-UI process, is temporarily locked by Windows,
+                    // or cannot be removed now. Never disrupt an active transcription.
+                }
+            }
+        }
+
+        // Clean only stale files from the old shared staging folder. A recent file may belong to an
+        // older application instance that is still finishing, so keep it for 24 hours.
+        if (Directory.Exists(OutputStagingDirectory))
+        {
+            var cutoff = DateTime.UtcNow - TimeSpan.FromHours(24);
+            foreach (var file in Directory.EnumerateFiles(OutputStagingDirectory, "asr-*", SearchOption.TopDirectoryOnly))
+            {
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(file) < cutoff)
+                    {
+                        File.Delete(file);
+                        removed++;
+                    }
+                }
+                catch { /* A locked file is not garbage yet. */ }
+            }
+        }
+
+        return removed;
     }
 
     public static string? FindCrispAsr() => FindFile(RuntimeDirectory, "crispasr.exe");

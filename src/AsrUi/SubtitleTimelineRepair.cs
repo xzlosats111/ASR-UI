@@ -12,13 +12,18 @@ internal sealed record SubtitleTimelineRepairResult(
     int ZeroLengthExpanded,
     int SmallOverlapsFixed,
     int MajorOverlapsLeftUntouched,
-    int ObviousLongCuesShortened)
+    int ObviousLongCuesShortened,
+    int PunctuationLoopRunsRemoved,
+    int PunctuationLoopCuesRemoved,
+    int PunctuationLoopNeighborCuesExpanded)
 {
-    public bool Changed => DuplicateZeroLengthRemoved + ZeroLengthMerged + ZeroLengthExpanded + SmallOverlapsFixed + ObviousLongCuesShortened > 0;
+    public bool Changed => DuplicateZeroLengthRemoved + ZeroLengthMerged + ZeroLengthExpanded + SmallOverlapsFixed
+        + ObviousLongCuesShortened + PunctuationLoopCuesRemoved + PunctuationLoopNeighborCuesExpanded > 0;
 
     public string Summary => $"时间轴清理：输入 {InputCues} 条，输出 {OutputCues} 条；"
         + $"零时长去重 {DuplicateZeroLengthRemoved}，合并 {ZeroLengthMerged}，补时 {ZeroLengthExpanded}；"
-        + $"小重叠修复 {SmallOverlapsFixed}，明显超长收缩 {ObviousLongCuesShortened}"
+        + $"小重叠修复 {SmallOverlapsFixed}，明显超长收缩 {ObviousLongCuesShortened}；"
+        + $"连续纯标点循环删除 {PunctuationLoopRunsRemoved} 组 / {PunctuationLoopCuesRemoved} 条，邻接有效短句补时 {PunctuationLoopNeighborCuesExpanded} 条"
         + (MajorOverlapsLeftUntouched > 0 ? $"；保留 {MajorOverlapsLeftUntouched} 个大重叠以避免错误移动字幕。" : "。");
 }
 
@@ -30,13 +35,17 @@ internal static class SubtitleTimelineRepair
     private static readonly TimeSpan MergeWindow = TimeSpan.FromMilliseconds(420);
     private static readonly TimeSpan MinimumCueLength = TimeSpan.FromMilliseconds(350);
     private static readonly TimeSpan SmallOverlapWindow = TimeSpan.FromMilliseconds(450);
+    // A run must be both semantically empty and tightly continuous. This catches decoder loops such
+    // as hundreds of 10 ms "…。" cues, without touching real short reactions like "えっ" or "うん".
+    private static readonly TimeSpan PunctuationLoopCueMaximum = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan PunctuationLoopGapMaximum = TimeSpan.FromMilliseconds(120);
 
     public static SubtitleTimelineRepairResult RepairFile(string srtPath)
     {
         var original = File.ReadAllText(srtPath);
         var cues = Parse(original);
         if (cues.Count == 0)
-            return new SubtitleTimelineRepairResult(0, 0, 0, 0, 0, 0, 0, 0);
+            return new SubtitleTimelineRepairResult(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 
         var duplicateZeroLengthRemoved = 0;
         var zeroLengthMerged = 0;
@@ -44,6 +53,9 @@ internal static class SubtitleTimelineRepair
         var smallOverlapsFixed = 0;
         var majorOverlapsLeftUntouched = 0;
         var obviousLongCuesShortened = 0;
+        var punctuationLoopRunsRemoved = 0;
+        var punctuationLoopCuesRemoved = 0;
+        var punctuationLoopNeighborCuesExpanded = 0;
         var repaired = new List<SubtitleCue>(cues.Count);
 
         for (var index = 0; index < cues.Count; index++)
@@ -91,6 +103,8 @@ internal static class SubtitleTimelineRepair
             repaired.Add(cue);
             zeroLengthExpanded++;
         }
+
+        RemovePunctuationLoops(repaired, out punctuationLoopRunsRemoved, out punctuationLoopCuesRemoved, out punctuationLoopNeighborCuesExpanded);
 
         for (var index = 1; index < repaired.Count; index++)
         {
@@ -146,7 +160,75 @@ internal static class SubtitleTimelineRepair
             zeroLengthExpanded,
             smallOverlapsFixed,
             majorOverlapsLeftUntouched,
-            obviousLongCuesShortened);
+            obviousLongCuesShortened,
+            punctuationLoopRunsRemoved,
+            punctuationLoopCuesRemoved,
+            punctuationLoopNeighborCuesExpanded);
+    }
+
+    private static void RemovePunctuationLoops(
+        List<SubtitleCue> cues,
+        out int runsRemoved,
+        out int cuesRemoved,
+        out int neighborCuesExpanded)
+    {
+        runsRemoved = 0;
+        cuesRemoved = 0;
+        neighborCuesExpanded = 0;
+        for (var index = 0; index < cues.Count;)
+        {
+            if (!IsPunctuationOnlyFragment(cues[index]))
+            {
+                index++;
+                continue;
+            }
+
+            var start = index;
+            var loopStart = cues[start].Start;
+            index++;
+            while (index < cues.Count
+                && IsPunctuationOnlyFragment(cues[index])
+                && cues[index].Start - cues[index - 1].End <= PunctuationLoopGapMaximum)
+            {
+                index++;
+            }
+
+            var count = index - start;
+            // Two consecutive ellipses can be a deliberate stylistic pause. Three tightly packed,
+            // semantically empty fragments cannot carry dialogue and are treated as a decoder loop.
+            if (count < 3) continue;
+
+            var previous = start > 0 ? cues[start - 1] : null;
+            var next = index < cues.Count ? cues[index] : null;
+            cues.RemoveRange(start, count);
+            runsRemoved++;
+            cuesRemoved += count;
+
+            // Q8's observed failure leaves a real phrase immediately before the punctuation loop in
+            // a 10 ms cue. Preserve that phrase and make it readable, but never fabricate missing text.
+            if (previous is not null
+                && VisibleCharacterPattern.IsMatch(previous.Text)
+                && previous.Duration < MinimumCueLength
+                && loopStart - previous.End <= PunctuationLoopGapMaximum)
+            {
+                var extendedEnd = previous.Start + MinimumCueLength;
+                if (next is not null && next.Start < extendedEnd) extendedEnd = next.Start;
+                if (extendedEnd > previous.End)
+                {
+                    previous.End = extendedEnd;
+                    neighborCuesExpanded++;
+                }
+            }
+
+            index = start;
+        }
+    }
+
+    private static bool IsPunctuationOnlyFragment(SubtitleCue cue)
+    {
+        return cue.Duration > TimeSpan.Zero
+            && cue.Duration <= PunctuationLoopCueMaximum
+            && !VisibleCharacterPattern.IsMatch(cue.Text);
     }
 
     private static List<SubtitleCue> Parse(string input)

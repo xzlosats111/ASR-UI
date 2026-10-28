@@ -36,9 +36,18 @@ internal sealed class MainForm : Form
     private readonly RadioButton _customOutput = new() { Text = "统一输出到指定文件夹" };
     private readonly TextBox _outputFolder = new();
     private Button _startButton = null!;
+    private Button _pauseButton = null!;
+    private Button _stopButton = null!;
     private readonly Label _subtitleStatus = new() { AutoSize = false };
     private readonly ProgressBar _subtitleProgress = new() { Minimum = 0, Maximum = 100, Style = ProgressBarStyle.Continuous };
     private readonly Label _subtitleProgressStatus = new() { AutoSize = false };
+    private readonly object _processGate = new();
+    private CancellationTokenSource? _batchCancellation;
+    private Process? _activeProcess;
+    private bool _activeProcessPaused;
+    private bool _pauseRequested;
+    private bool _batchRunning;
+    private bool _closeAfterForcedStop;
     private int _batchFileCount = 1;
     private int _batchFileIndex;
     private int _lastFileProgress;
@@ -64,7 +73,7 @@ internal sealed class MainForm : Form
         _settings = settings;
         AppPaths.ConfigureModelDirectory(_settings.ModelDirectory);
         AppPaths.EnsureDirectories();
-        Text = "ASR-UI v0.1.5 · 日语字幕工作台";
+        Text = "ASR-UI v0.1.7 · 日语字幕工作台";
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(1180, 820);
         Size = new Size(1280, 900);
@@ -83,9 +92,14 @@ internal sealed class MainForm : Form
         ShowPage("subtitle");
 
         Shown += (_, _) => EnsureComponentListFitsScreen();
-        AppendLog("ASR-UI v0.1.6 已启动。首次使用请先打开“组件与下载”下载默认勾选项目。");
+        FormClosing += HandleFormClosing;
+        var removedWorkspaces = AppPaths.CleanupOrphanedWorkspaces();
+        AppendLog("ASR-UI v0.1.7 已启动。首次使用请先打开“组件与下载”下载默认勾选项目。");
         AppendLog($"工作目录：{AppPaths.BaseDirectory}");
         AppendLog($"模型目录：{AppPaths.ModelDirectory}");
+        AppendLog(removedWorkspaces > 0
+            ? $"启动清理：已移除 {removedWorkspaces} 个上次异常退出遗留的临时工作区/旧临时字幕。"
+            : "临时工作区检查完成：没有可清理的遗留文件。");
     }
 
     private Panel BuildNavigation()
@@ -175,7 +189,7 @@ internal sealed class MainForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 104));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));
 
         root.Controls.Add(TitleBlock("日语字幕", "选择两个本地模式之一。每个文件单独处理；视频先由 FFmpeg 转 WAV，某个文件失败后会继续处理后续文件。"), 0, 0);
 
@@ -236,23 +250,33 @@ internal sealed class MainForm : Form
 
         var action = new Panel { Dock = DockStyle.Fill, BackColor = _pageColor };
         _startButton = PrimaryButton("开始批量生成 SRT");
-        _startButton.Font = BoldFont(11F);
-        _startButton.Location = new Point(0, 10);
-        _startButton.Size = new Size(220, 46);
+        _startButton.Font = BoldFont(10F);
+        _startButton.Location = new Point(0, 12);
+        _startButton.Size = new Size(178, 42);
         _startButton.Click += async (_, _) => await StartBatchAsync();
-        _subtitleProgress.Location = new Point(236, 10);
-        _subtitleProgress.Size = new Size(350, 18);
+        _pauseButton = SecondaryButton("暂停任务");
+        _pauseButton.Location = new Point(190, 12);
+        _pauseButton.Size = new Size(92, 42);
+        _pauseButton.Enabled = false;
+        _pauseButton.Click += (_, _) => TogglePauseResume();
+        _stopButton = SecondaryButton("强制停止");
+        _stopButton.Location = new Point(294, 12);
+        _stopButton.Size = new Size(92, 42);
+        _stopButton.Enabled = false;
+        _stopButton.Click += (_, _) => RequestForcedStop();
+        _subtitleProgress.Location = new Point(400, 12);
+        _subtitleProgress.Size = new Size(255, 18);
         _subtitleProgress.Anchor = AnchorStyles.Top | AnchorStyles.Left;
-        _subtitleProgressStatus.Location = new Point(236, 33);
-        _subtitleProgressStatus.Size = new Size(380, 25);
+        _subtitleProgressStatus.Location = new Point(400, 35);
+        _subtitleProgressStatus.Size = new Size(270, 28);
         _subtitleProgressStatus.Text = "等待开始";
         _subtitleProgressStatus.ForeColor = Color.DimGray;
-        _subtitleStatus.Location = new Point(630, 10);
-        _subtitleStatus.Size = new Size(430, 48);
+        _subtitleStatus.Location = new Point(682, 10);
+        _subtitleStatus.Size = new Size(380, 52);
         _subtitleStatus.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-        _subtitleStatus.Text = "高质量模式需要：Qwen Anime Q4_K + ForcedAligner Q4_K；快速模式需要：Parakeet Japanese Q8_0。";
+        _subtitleStatus.Text = "暂停会冻结当前 FFmpeg/CrispASR 进程并可无损继续；强制停止会结束当前文件并清理临时工作区。";
         _subtitleStatus.ForeColor = Color.DimGray;
-        action.Controls.AddRange(new Control[] { _startButton, _subtitleProgress, _subtitleProgressStatus, _subtitleStatus });
+        action.Controls.AddRange(new Control[] { _startButton, _pauseButton, _stopButton, _subtitleProgress, _subtitleProgressStatus, _subtitleStatus });
         root.Controls.Add(action, 0, 4);
         return root;
     }
@@ -635,6 +659,7 @@ internal sealed class MainForm : Form
 
     private async Task StartBatchAsync()
     {
+        if (_batchRunning) return;
         var files = _inputFiles.Items.Cast<string>().ToArray();
         if (files.Length == 0)
         {
@@ -669,22 +694,40 @@ internal sealed class MainForm : Form
 
         if (!ApplyModelDirectory()) return;
         SaveSettings();
-        _startButton.Enabled = false;
-        _subtitleStatus.Text = "任务正在运行；识别阶段会显示 CrispASR 实际完成的语音片段 / 总片段数。";
+        _batchRunning = true;
+        _pauseRequested = false;
+        _batchCancellation = new CancellationTokenSource();
+        var cancellationToken = _batchCancellation.Token;
+        UpdateBatchActionButtons();
+        _subtitleStatus.Text = "任务正在运行；可暂停后无损继续，或强制停止当前文件。识别阶段会显示 CrispASR 实际完成的语音片段 / 总片段数。";
         BeginBatchProgress(files.Length);
         var successful = 0;
         var failures = new List<string>();
+        var stopped = false;
         try
         {
             for (var index = 0; index < files.Length; index++)
             {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    stopped = true;
+                    break;
+                }
+
                 var input = files[index];
                 BeginFileProgress(index, input);
                 try
                 {
-                    await TranscribeOneAsync(input, preset);
+                    await TranscribeOneAsync(input, preset, cancellationToken);
                     successful++;
                     SetFileProgress(100, "字幕已保存");
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    stopped = true;
+                    SetFileProgress(100, "当前文件已强制停止，未处理后续文件");
+                    AppendLog($"已强制停止当前文件：{input}");
+                    break;
                 }
                 catch (Exception ex)
                 {
@@ -696,27 +739,45 @@ internal sealed class MainForm : Form
         }
         finally
         {
-            _startButton.Enabled = true;
+            stopped |= cancellationToken.IsCancellationRequested;
+            _batchCancellation?.Dispose();
+            _batchCancellation = null;
+            _batchRunning = false;
+            _pauseRequested = false;
+            UpdateBatchActionButtons();
         }
 
-        var summary = $"完成 {successful} 个文件。";
+        var summary = stopped ? $"已强制停止。已完成 {successful} 个文件；当前文件的临时 WAV 和临时 SRT 已清理，未开始的文件不会继续处理。" : $"完成 {successful} 个文件。";
         if (failures.Count > 0) summary += $"\n\n跳过/失败 {failures.Count} 个：\n" + string.Join("\n", failures);
         _subtitleStatus.Text = summary.Replace("\n", " ");
         AppendLog(summary);
-        MessageBox.Show(this, summary, "批量任务完成", MessageBoxButtons.OK, failures.Count == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+
+        if (_closeAfterForcedStop)
+        {
+            BeginInvoke(new Action(Close));
+            return;
+        }
+
+        MessageBox.Show(this, summary, stopped ? "批量任务已停止" : "批量任务完成", MessageBoxButtons.OK,
+            stopped || failures.Count > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
     }
 
-    private async Task TranscribeOneAsync(string input, SubtitlePreset preset)
+    private async Task TranscribeOneAsync(string input, SubtitlePreset preset, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var crisp = AppPaths.FindCrispAsr() ?? throw new FileNotFoundException("未找到 crispasr.exe。");
         var ffmpeg = AppPaths.FindFfmpeg() ?? throw new FileNotFoundException("未找到 ffmpeg.exe。");
-        var tempWav = Path.Combine(Path.GetTempPath(), "ASR-UI-" + Guid.NewGuid() + ".wav");
-        string? stagingSrt = null;
+        var workspace = TemporaryJobWorkspace.Create();
+        var tempWav = workspace.GetPath("audio.wav");
+        var stagingBaseName = workspace.GetPath("result");
+        var stagingSrt = stagingBaseName + ".srt";
         try
         {
             AppendLog($"========== 开始：{input} ==========");
+            AppendLog($"本文件临时工作区：{workspace.DirectoryPath}");
             SetFileProgress(0, "正在读取音轨并用 FFmpeg 转换音频");
             var audioTrack = await ResolveAudioTrackAsync(input);
+            cancellationToken.ThrowIfCancellationRequested();
             var ffmpegArguments = new List<string> { "-hide_banner", "-nostdin", "-y", "-i", input };
             if (audioTrack is not null)
             {
@@ -724,7 +785,8 @@ internal sealed class MainForm : Form
                 ffmpegArguments.Add($"0:{audioTrack.StreamIndex}");
             }
             ffmpegArguments.AddRange(new[] { "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", tempWav });
-            await RunProcessAsync(ffmpeg, ffmpegArguments, null, ProcessProgressStage.AudioConversion);
+            await RunProcessAsync(ffmpeg, ffmpegArguments, null, ProcessProgressStage.AudioConversion, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             if (!File.Exists(tempWav)) throw new InvalidDataException("FFmpeg 没有生成临时 WAV 文件。");
 
             var outputDirectory = _sourceOutput.Checked ? Path.GetDirectoryName(input)! : _outputFolder.Text.Trim();
@@ -741,14 +803,10 @@ internal sealed class MainForm : Form
             var requestedSrt = requestedBaseName + ".srt";
 
             // CrispASR v0.8.45 writes SRT through a narrow-character Windows stream.
-            // It can recognize Unicode source paths, but cannot always create an SRT whose
-            // output path contains Chinese/Japanese characters. Always write to an ASCII-safe
-            // staging base first, then let .NET copy the completed subtitle to the requested path.
-            Directory.CreateDirectory(AppPaths.OutputStagingDirectory);
-            var stagingBaseName = Path.Combine(AppPaths.OutputStagingDirectory, "asr-" + Guid.NewGuid().ToString("N"));
-            stagingSrt = stagingBaseName + ".srt";
+            // Keep both the WAV and SRT inside one short, application-owned workspace, then let .NET
+            // copy the finished SRT to the requested Unicode-capable destination.
             AppendLog($"字幕目标：{requestedSrt}");
-            AppendLog($"识别临时输出：{stagingSrt}（完成后将自动复制到字幕目标，以兼容中文/日文路径）");
+            AppendLog($"识别临时输出：{stagingSrt}（完成后自动复制；正常完成或强制停止均会清理整个工作区）");
 
             var arguments = new List<string>();
             if (isQwen)
@@ -768,9 +826,10 @@ internal sealed class MainForm : Form
             // -pp is CrispASR's real per-VAD-slice decode/alignment progress, not a guessed timer.
             arguments.AddRange(new[] { "--split-on-punct", "-pp", "-osrt", "-of", stagingBaseName });
             SetFileProgressIndeterminate("正在加载模型、执行 VAD 并准备识别");
-            await RunProcessAsync(crisp, arguments, BuildEngineEnvironment(), ProcessProgressStage.Recognition);
+            await RunProcessAsync(crisp, arguments, BuildEngineEnvironment(), ProcessProgressStage.Recognition, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             if (!File.Exists(stagingSrt)) throw new InvalidDataException($"识别引擎已结束，但没有生成临时字幕：{stagingSrt}");
-            SetFileProgress(98, "正在自动清理零时长、轻微重叠和异常超长时间轴");
+            SetFileProgress(98, "正在自动清理零时长、标点循环、轻微重叠和异常超长时间轴");
             try
             {
                 var repair = SubtitleTimelineRepair.RepairFile(stagingSrt);
@@ -781,21 +840,23 @@ internal sealed class MainForm : Form
                 // A valid engine SRT is still more useful than failing the whole file because an optional cleanup failed.
                 AppendLog("时间轴自动清理失败，保留 CrispASR 原始 SRT：" + ex.Message);
             }
+            cancellationToken.ThrowIfCancellationRequested();
             SetFileProgress(99, "正在保存字幕到所选输出位置");
             File.Copy(stagingSrt, requestedSrt, true);
-            File.Delete(stagingSrt);
             AppendLog($"完成：{requestedSrt}");
         }
         finally
         {
-            try { if (File.Exists(tempWav)) File.Delete(tempWav); } catch { /* Temporary file removal should not fail the batch. */ }
-            try { if (stagingSrt is not null && File.Exists(stagingSrt)) File.Delete(stagingSrt); } catch { /* Staging cleanup should not fail the batch. */ }
+            if (workspace.TryCleanup(out var cleanupError))
+                AppendLog("临时工作区已清理：" + workspace.DirectoryPath);
+            else
+                AppendLog("临时工作区清理失败；下次启动会自动重试：" + workspace.DirectoryPath + " · " + cleanupError);
         }
     }
 
     private Dictionary<string, string?> BuildEngineEnvironment()
     {
-        var values = new Dictionary<string, string?> { ["CRISPASR_CACHE_DIR"] = AppPaths.CacheDirectory };
+        var values = new Dictionary<string, string?> { ["CRISPASR_CACHE_DIR"] = AppPaths.CrispAsrCacheDirectory };
         if (_useProxy.Checked)
         {
             values["HTTP_PROXY"] = _proxyUrl.Text.Trim();
@@ -923,8 +984,14 @@ internal sealed class MainForm : Form
         return value.TotalHours >= 1 ? value.ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture) : value.ToString(@"mm\:ss", CultureInfo.InvariantCulture);
     }
 
-    private async Task RunProcessAsync(string executable, IEnumerable<string> arguments, IReadOnlyDictionary<string, string?>? environment, ProcessProgressStage progressStage = ProcessProgressStage.None)
+    private async Task RunProcessAsync(
+        string executable,
+        IEnumerable<string> arguments,
+        IReadOnlyDictionary<string, string?>? environment,
+        ProcessProgressStage progressStage,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var start = new ProcessStartInfo
         {
             FileName = executable,
@@ -951,10 +1018,177 @@ internal sealed class MainForm : Form
         process.OutputDataReceived += (_, e) => HandleProcessLine(e.Data, progressStage);
         process.ErrorDataReceived += (_, e) => HandleProcessLine(e.Data, progressStage);
         if (!process.Start()) throw new InvalidOperationException("无法启动进程。");
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        await process.WaitForExitAsync();
-        if (process.ExitCode != 0) throw new InvalidOperationException($"进程返回退出代码 {process.ExitCode}。");
+        SetActiveProcess(process);
+        try
+        {
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            await process.WaitForExitAsync();
+            cancellationToken.ThrowIfCancellationRequested();
+            if (process.ExitCode != 0) throw new InvalidOperationException($"进程返回退出代码 {process.ExitCode}。");
+        }
+        finally
+        {
+            ClearActiveProcess(process);
+        }
+    }
+
+    private void UpdateBatchActionButtons()
+    {
+        _startButton.Enabled = !_batchRunning;
+        _pauseButton.Enabled = _batchRunning;
+        _stopButton.Enabled = _batchRunning;
+        _pauseButton.Text = _pauseRequested ? "继续任务" : "暂停任务";
+    }
+
+    private void TogglePauseResume()
+    {
+        if (!_batchRunning) return;
+
+        if (!_pauseRequested)
+        {
+            _pauseRequested = true;
+            UpdateBatchActionButtons();
+            var hadActiveProcess = HasActiveProcess();
+            var pausedNow = SuspendActiveProcessIfPresent();
+            if (hadActiveProcess && !pausedNow)
+            {
+                _pauseRequested = false;
+                UpdateBatchActionButtons();
+                _subtitleStatus.Text = "暂停当前外部进程失败；任务仍在继续。请查看运行日志，或使用“强制停止”。";
+                return;
+            }
+
+            _subtitleStatus.Text = pausedNow
+                ? "任务已暂停：当前 FFmpeg/CrispASR 已冻结，临时 WAV、GPU 内存和识别进度会原样保留；点击“继续任务”恢复。"
+                : "已请求暂停：当前正处于文件切换/保存阶段；下一个 FFmpeg 或 CrispASR 进程启动后会立即冻结。";
+            AppendLog(pausedNow ? "任务已暂停：外部处理进程已冻结，可无损继续。" : "已请求暂停：等待当前短暂文件操作结束后冻结下一外部进程。");
+        }
+        else
+        {
+            _pauseRequested = false;
+            ResumeActiveProcessIfPaused();
+            UpdateBatchActionButtons();
+            _subtitleStatus.Text = "任务已继续：从暂停时的当前 FFmpeg/CrispASR 处理位置恢复。";
+            AppendLog("任务已继续。");
+        }
+    }
+
+    private void RequestForcedStop()
+    {
+        if (!_batchRunning) return;
+
+        _pauseRequested = false;
+        _batchCancellation?.Cancel();
+        Process? process;
+        var wasPaused = false;
+        lock (_processGate)
+        {
+            process = _activeProcess;
+            wasPaused = _activeProcessPaused;
+            _activeProcessPaused = false;
+        }
+
+        if (process is not null)
+        {
+            if (wasPaused) NativeProcessControl.TryResume(process, out _);
+            try
+            {
+                if (!process.HasExited) process.Kill(entireProcessTree: true);
+                AppendLog("已向当前外部进程发送强制结束请求。");
+            }
+            catch (Exception ex)
+            {
+                AppendLog("强制结束当前外部进程时出现异常（任务仍会取消）：" + ex.Message);
+            }
+        }
+
+        UpdateBatchActionButtons();
+        _subtitleStatus.Text = "正在强制停止当前文件；进程结束后会清理本文件临时 WAV / SRT，且不会开始后续文件。";
+        AppendLog("已请求强制停止：不会继续后续文件。");
+    }
+
+    private void SetActiveProcess(Process process)
+    {
+        lock (_processGate)
+        {
+            _activeProcess = process;
+            _activeProcessPaused = false;
+        }
+
+        if (_pauseRequested) SuspendActiveProcessIfPresent();
+    }
+
+    private void ClearActiveProcess(Process process)
+    {
+        lock (_processGate)
+        {
+            if (!ReferenceEquals(_activeProcess, process)) return;
+            _activeProcess = null;
+            _activeProcessPaused = false;
+        }
+    }
+
+    private bool HasActiveProcess()
+    {
+        lock (_processGate) return _activeProcess is not null;
+    }
+
+    private bool SuspendActiveProcessIfPresent()
+    {
+        string? error = null;
+        var suspended = false;
+        lock (_processGate)
+        {
+            if (_activeProcess is null || _activeProcessPaused) return _activeProcessPaused;
+            if (NativeProcessControl.TrySuspend(_activeProcess, out error))
+            {
+                _activeProcessPaused = true;
+                suspended = true;
+            }
+        }
+
+        if (!suspended && !string.IsNullOrWhiteSpace(error))
+            AppendLog("暂停当前外部进程失败：" + error);
+        return suspended;
+    }
+
+    private void ResumeActiveProcessIfPaused()
+    {
+        string? error = null;
+        var resumed = false;
+        lock (_processGate)
+        {
+            if (_activeProcess is null || !_activeProcessPaused) return;
+            if (NativeProcessControl.TryResume(_activeProcess, out error))
+            {
+                _activeProcessPaused = false;
+                resumed = true;
+            }
+        }
+
+        if (!resumed && !string.IsNullOrWhiteSpace(error))
+            AppendLog("继续当前外部进程失败：" + error);
+    }
+
+    private void HandleFormClosing(object? sender, FormClosingEventArgs e)
+    {
+        if (!_batchRunning || _closeAfterForcedStop) return;
+
+        var choice = MessageBox.Show(this,
+            "字幕任务仍在运行。选择“是”会强制停止当前 FFmpeg/CrispASR 进程、清理本文件临时工作区，然后关闭窗口。\n\n选择“否”可返回程序并使用“暂停任务”或“强制停止”。",
+            "任务仍在运行",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning);
+        if (choice != DialogResult.Yes)
+        {
+            e.Cancel = true;
+            return;
+        }
+
+        e.Cancel = true;
+        _closeAfterForcedStop = true;
+        RequestForcedStop();
     }
 
     private void HandleProcessLine(string? line, ProcessProgressStage progressStage)
