@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Drawing;
+using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace AsrUi;
 
@@ -8,6 +10,13 @@ internal enum SubtitlePreset
     QwenQualityQ4,
     ParakeetFast,
     QwenQualityQ8
+}
+
+internal enum ProcessProgressStage
+{
+    None,
+    AudioConversion,
+    Recognition
 }
 
 internal sealed class MainForm : Form
@@ -26,6 +35,15 @@ internal sealed class MainForm : Form
     private readonly TextBox _outputFolder = new();
     private Button _startButton = null!;
     private readonly Label _subtitleStatus = new() { AutoSize = false };
+    private readonly ProgressBar _subtitleProgress = new() { Minimum = 0, Maximum = 100, Style = ProgressBarStyle.Continuous };
+    private readonly Label _subtitleProgressStatus = new() { AutoSize = false };
+    private int _batchFileCount = 1;
+    private int _batchFileIndex;
+    private int _lastFileProgress;
+    private double? _activeDurationSeconds;
+    private static readonly Regex FfmpegDurationPattern = new(@"Duration:\s*(?<time>\d{2}:\d{2}:\d{2}(?:\.\d+)?)", RegexOptions.Compiled);
+    private static readonly Regex FfmpegTimePattern = new(@"time=(?<time>\d{2}:\d{2}:\d{2}(?:\.\d+)?)", RegexOptions.Compiled);
+    private static readonly Regex SrtTimestampPattern = new(@"\[\d{2}:\d{2}:\d{2}(?:\.\d+)?\s*-->\s*(?<time>\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]", RegexOptions.Compiled);
 
     private readonly CheckedListBox _components = new() { CheckOnClick = true };
     private readonly RichTextBox _componentDetails = new() { ReadOnly = true, BorderStyle = BorderStyle.FixedSingle };
@@ -43,7 +61,7 @@ internal sealed class MainForm : Form
         _settings = settings;
         AppPaths.ConfigureModelDirectory(_settings.ModelDirectory);
         AppPaths.EnsureDirectories();
-        Text = "ASR-UI v0.1.3 · 日语字幕工作台";
+        Text = "ASR-UI v0.1.4 · 日语字幕工作台";
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(1180, 820);
         Size = new Size(1280, 900);
@@ -62,7 +80,7 @@ internal sealed class MainForm : Form
         ShowPage("subtitle");
 
         Shown += (_, _) => EnsureComponentListFitsScreen();
-        AppendLog("ASR-UI v0.1.3 已启动。首次使用请先打开“组件与下载”下载默认勾选项目。");
+        AppendLog("ASR-UI v0.1.4 已启动。首次使用请先打开“组件与下载”下载默认勾选项目。");
         AppendLog($"工作目录：{AppPaths.BaseDirectory}");
         AppendLog($"模型目录：{AppPaths.ModelDirectory}");
     }
@@ -208,13 +226,21 @@ internal sealed class MainForm : Form
         _startButton = PrimaryButton("开始批量生成 SRT");
         _startButton.Font = BoldFont(11F);
         _startButton.Location = new Point(0, 10);
-        _startButton.Size = new Size(240, 46);
+        _startButton.Size = new Size(220, 46);
         _startButton.Click += async (_, _) => await StartBatchAsync();
-        _subtitleStatus.Location = new Point(260, 12);
-        _subtitleStatus.Size = new Size(700, 45);
+        _subtitleProgress.Location = new Point(236, 10);
+        _subtitleProgress.Size = new Size(350, 18);
+        _subtitleProgress.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+        _subtitleProgressStatus.Location = new Point(236, 33);
+        _subtitleProgressStatus.Size = new Size(380, 25);
+        _subtitleProgressStatus.Text = "等待开始";
+        _subtitleProgressStatus.ForeColor = Color.DimGray;
+        _subtitleStatus.Location = new Point(630, 10);
+        _subtitleStatus.Size = new Size(430, 48);
+        _subtitleStatus.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         _subtitleStatus.Text = "高质量模式需要：Qwen Anime Q4_K + ForcedAligner Q4_K；快速模式需要：Parakeet Japanese Q8_0。";
         _subtitleStatus.ForeColor = Color.DimGray;
-        action.Controls.AddRange(new Control[] { _startButton, _subtitleStatus });
+        action.Controls.AddRange(new Control[] { _startButton, _subtitleProgress, _subtitleProgressStatus, _subtitleStatus });
         root.Controls.Add(action, 0, 4);
         return root;
     }
@@ -569,21 +595,26 @@ internal sealed class MainForm : Form
         if (!ApplyModelDirectory()) return;
         SaveSettings();
         _startButton.Enabled = false;
-        _subtitleStatus.Text = "任务正在运行，请查看“运行日志”。";
+        _subtitleStatus.Text = "任务正在运行；下方进度依据 FFmpeg 时间和识别到的字幕时间实时更新。";
+        BeginBatchProgress(files.Length);
         var successful = 0;
         var failures = new List<string>();
         try
         {
-            foreach (var input in files)
+            for (var index = 0; index < files.Length; index++)
             {
+                var input = files[index];
+                BeginFileProgress(index, input);
                 try
                 {
                     await TranscribeOneAsync(input, preset);
                     successful++;
+                    SetFileProgress(100, "字幕已保存");
                 }
                 catch (Exception ex)
                 {
                     failures.Add($"{input}：{ex.Message}");
+                    SetFileProgress(100, "本文件失败，继续下一个文件");
                     AppendLog($"失败，继续下一个文件：{input}\n{ex.Message}");
                 }
             }
@@ -605,10 +636,12 @@ internal sealed class MainForm : Form
         var crisp = AppPaths.FindCrispAsr() ?? throw new FileNotFoundException("未找到 crispasr.exe。");
         var ffmpeg = AppPaths.FindFfmpeg() ?? throw new FileNotFoundException("未找到 ffmpeg.exe。");
         var tempWav = Path.Combine(Path.GetTempPath(), "ASR-UI-" + Guid.NewGuid() + ".wav");
+        string? stagingSrt = null;
         try
         {
             AppendLog($"========== 开始：{input} ==========");
-            await RunProcessAsync(ffmpeg, new[] { "-hide_banner", "-nostdin", "-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", tempWav }, null);
+            SetFileProgress(0, "正在用 FFmpeg 转换音频");
+            await RunProcessAsync(ffmpeg, new[] { "-hide_banner", "-nostdin", "-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", tempWav }, null, ProcessProgressStage.AudioConversion);
             if (!File.Exists(tempWav)) throw new InvalidDataException("FFmpeg 没有生成临时 WAV 文件。");
 
             var outputDirectory = _sourceOutput.Checked ? Path.GetDirectoryName(input)! : _outputFolder.Text.Trim();
@@ -621,18 +654,34 @@ internal sealed class MainForm : Form
                 SubtitlePreset.QwenQualityQ8 => ".qwen-ja-q8",
                 _ => ".parakeet-ja"
             };
-            var baseName = Path.Combine(outputDirectory, Path.GetFileNameWithoutExtension(input) + suffix);
+            var requestedBaseName = Path.Combine(outputDirectory, Path.GetFileNameWithoutExtension(input) + suffix);
+            var requestedSrt = requestedBaseName + ".srt";
+
+            // CrispASR v0.8.45 writes SRT through a narrow-character Windows stream.
+            // It can recognize Unicode source paths, but cannot always create an SRT whose
+            // output path contains Chinese/Japanese characters. Always write to an ASCII-safe
+            // staging base first, then let .NET copy the completed subtitle to the requested path.
+            Directory.CreateDirectory(AppPaths.OutputStagingDirectory);
+            var stagingBaseName = Path.Combine(AppPaths.OutputStagingDirectory, "asr-" + Guid.NewGuid().ToString("N"));
+            stagingSrt = stagingBaseName + ".srt";
+            AppendLog($"字幕目标：{requestedSrt}");
+            AppendLog($"识别临时输出：{stagingSrt}（完成后将自动复制到字幕目标，以兼容中文/日文路径）");
+
             var arguments = isQwen
-                ? new[] { "--backend", "qwen3", "-m", qwenModel.TargetPath, "-am", ComponentCatalog.QwenAlignerQ4.TargetPath, "--gpu-backend", "cuda", "-f", tempWav, "-l", "ja", "--vad", "--split-on-punct", "-osrt", "-of", baseName }
-                : new[] { "--backend", "parakeet", "-m", ComponentCatalog.ParakeetJaQ8.TargetPath, "--gpu-backend", "cuda", "-f", tempWav, "-l", "ja", "--vad", "--split-on-punct", "--parakeet-decoder", "ctc", "-osrt", "-of", baseName };
-            await RunProcessAsync(crisp, arguments, BuildEngineEnvironment());
-            var srt = baseName + ".srt";
-            if (!File.Exists(srt)) throw new InvalidDataException($"识别引擎已结束，但没有生成：{srt}");
-            AppendLog($"完成：{srt}");
+                ? new[] { "--backend", "qwen3", "-m", qwenModel.TargetPath, "-am", ComponentCatalog.QwenAlignerQ4.TargetPath, "--gpu-backend", "cuda", "-f", tempWav, "-l", "ja", "--vad", "--split-on-punct", "-osrt", "-of", stagingBaseName }
+                : new[] { "--backend", "parakeet", "-m", ComponentCatalog.ParakeetJaQ8.TargetPath, "--gpu-backend", "cuda", "-f", tempWav, "-l", "ja", "--vad", "--split-on-punct", "--parakeet-decoder", "ctc", "-osrt", "-of", stagingBaseName };
+            SetFileProgress(8, "正在加载模型、VAD 并识别");
+            await RunProcessAsync(crisp, arguments, BuildEngineEnvironment(), ProcessProgressStage.Recognition);
+            if (!File.Exists(stagingSrt)) throw new InvalidDataException($"识别引擎已结束，但没有生成临时字幕：{stagingSrt}");
+            SetFileProgress(98, "正在保存字幕到所选输出位置");
+            File.Copy(stagingSrt, requestedSrt, true);
+            File.Delete(stagingSrt);
+            AppendLog($"完成：{requestedSrt}");
         }
         finally
         {
             try { if (File.Exists(tempWav)) File.Delete(tempWav); } catch { /* Temporary file removal should not fail the batch. */ }
+            try { if (stagingSrt is not null && File.Exists(stagingSrt)) File.Delete(stagingSrt); } catch { /* Staging cleanup should not fail the batch. */ }
         }
     }
 
@@ -652,7 +701,96 @@ internal sealed class MainForm : Form
         return values;
     }
 
-    private async Task RunProcessAsync(string executable, IEnumerable<string> arguments, IReadOnlyDictionary<string, string?>? environment)
+    private void BeginBatchProgress(int fileCount)
+    {
+        _batchFileCount = Math.Max(1, fileCount);
+        _batchFileIndex = 0;
+        _lastFileProgress = 0;
+        _activeDurationSeconds = null;
+        _subtitleProgress.Style = ProgressBarStyle.Continuous;
+        _subtitleProgress.Value = 0;
+        _subtitleProgressStatus.Text = $"准备处理 {_batchFileCount} 个文件";
+    }
+
+    private void BeginFileProgress(int fileIndex, string input)
+    {
+        _batchFileIndex = fileIndex;
+        _lastFileProgress = 0;
+        _activeDurationSeconds = null;
+        SetFileProgress(0, "准备处理：" + Path.GetFileName(input));
+    }
+
+    private void SetFileProgress(int filePercent, string status)
+    {
+        filePercent = Math.Clamp(filePercent, 0, 100);
+        _lastFileProgress = Math.Max(_lastFileProgress, filePercent);
+        var overall = Math.Clamp((int)Math.Round((_batchFileIndex * 100d + _lastFileProgress) / _batchFileCount), 0, 100);
+        _subtitleProgress.Style = ProgressBarStyle.Continuous;
+        _subtitleProgress.Value = overall;
+        _subtitleProgressStatus.Text = $"第 {_batchFileIndex + 1}/{_batchFileCount} 个 · {status} · 总进度 {overall}%";
+    }
+
+    private void ObserveProcessProgress(string line, ProcessProgressStage stage)
+    {
+        if (stage == ProcessProgressStage.None) return;
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action(() => ObserveProcessProgress(line, stage)));
+            return;
+        }
+
+        if (stage == ProcessProgressStage.AudioConversion)
+        {
+            var durationMatch = FfmpegDurationPattern.Match(line);
+            if (durationMatch.Success && TryParseTimestamp(durationMatch.Groups["time"].Value, out var duration))
+            {
+                _activeDurationSeconds = duration.TotalSeconds;
+                SetFileProgress(0, $"正在转换音频，时长 {FormatProgressTime(duration)}");
+                return;
+            }
+
+            var timeMatch = FfmpegTimePattern.Match(line);
+            if (timeMatch.Success && _activeDurationSeconds is > 0 && TryParseTimestamp(timeMatch.Groups["time"].Value, out var current))
+            {
+                var ratio = Math.Clamp(current.TotalSeconds / _activeDurationSeconds.Value, 0d, 1d);
+                SetFileProgress((int)Math.Round(ratio * 8d), $"正在转换音频 {FormatProgressTime(current)} / {FormatProgressTime(TimeSpan.FromSeconds(_activeDurationSeconds.Value))}");
+            }
+            return;
+        }
+
+        if (line.Contains("loaded ", StringComparison.OrdinalIgnoreCase))
+        {
+            SetFileProgress(10, "模型已加载，正在进行 VAD 和识别");
+        }
+        else if (line.Contains("detecting speech", StringComparison.OrdinalIgnoreCase))
+        {
+            SetFileProgress(12, "正在检测语音片段");
+        }
+        else if (line.Contains("[aligner]", StringComparison.OrdinalIgnoreCase))
+        {
+            SetFileProgress(94, "正在强制对齐和整理时间轴");
+        }
+
+        var timestampMatch = SrtTimestampPattern.Match(line);
+        if (timestampMatch.Success && _activeDurationSeconds is > 0 && TryParseTimestamp(timestampMatch.Groups["time"].Value, out var recognized))
+        {
+            var ratio = Math.Clamp(recognized.TotalSeconds / _activeDurationSeconds.Value, 0d, 1d);
+            var progress = 12 + (int)Math.Round(ratio * 84d);
+            SetFileProgress(progress, $"正在识别 {FormatProgressTime(recognized)} / {FormatProgressTime(TimeSpan.FromSeconds(_activeDurationSeconds.Value))}");
+        }
+    }
+
+    private static bool TryParseTimestamp(string value, out TimeSpan timestamp)
+    {
+        return TimeSpan.TryParse(value, CultureInfo.InvariantCulture, out timestamp);
+    }
+
+    private static string FormatProgressTime(TimeSpan value)
+    {
+        return value.TotalHours >= 1 ? value.ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture) : value.ToString(@"mm\:ss", CultureInfo.InvariantCulture);
+    }
+
+    private async Task RunProcessAsync(string executable, IEnumerable<string> arguments, IReadOnlyDictionary<string, string?>? environment, ProcessProgressStage progressStage = ProcessProgressStage.None)
     {
         var start = new ProcessStartInfo
         {
@@ -677,13 +815,20 @@ internal sealed class MainForm : Form
 
         AppendLog("> " + executable + " " + string.Join(" ", start.ArgumentList));
         using var process = new Process { StartInfo = start, EnableRaisingEvents = true };
-        process.OutputDataReceived += (_, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) AppendLog(e.Data); };
-        process.ErrorDataReceived += (_, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) AppendLog(e.Data); };
+        process.OutputDataReceived += (_, e) => HandleProcessLine(e.Data, progressStage);
+        process.ErrorDataReceived += (_, e) => HandleProcessLine(e.Data, progressStage);
         if (!process.Start()) throw new InvalidOperationException("无法启动进程。");
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
         await process.WaitForExitAsync();
         if (process.ExitCode != 0) throw new InvalidOperationException($"进程返回退出代码 {process.ExitCode}。");
+    }
+
+    private void HandleProcessLine(string? line, ProcessProgressStage progressStage)
+    {
+        if (string.IsNullOrWhiteSpace(line)) return;
+        AppendLog(line);
+        ObserveProcessProgress(line, progressStage);
     }
 
     private void LaunchLegacy()

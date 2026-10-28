@@ -12,6 +12,9 @@ internal static class AppPaths
     private static string _modelDirectory = DefaultModelDirectory;
     public static string ModelDirectory => _modelDirectory;
     public static string CacheDirectory => Path.Combine(BaseDirectory, "cache");
+    // CrispASR v0.8.45's Windows SRT writer is not reliably Unicode-path safe.
+    // Keep its short ASCII temporary output inside the application cache, then copy via .NET.
+    public static string OutputStagingDirectory => Path.Combine(CacheDirectory, "output");
     public static string SettingsFile => Path.Combine(DataDirectory, "settings.json");
 
     public static void ConfigureModelDirectory(string? directory)
@@ -23,7 +26,7 @@ internal static class AppPaths
 
     public static void EnsureDirectories()
     {
-        foreach (var path in new[] { DataDirectory, DownloadDirectory, RuntimeDirectory, ModelDirectory, CacheDirectory })
+        foreach (var path in new[] { DataDirectory, DownloadDirectory, RuntimeDirectory, ModelDirectory, CacheDirectory, OutputStagingDirectory })
             Directory.CreateDirectory(path);
     }
 
