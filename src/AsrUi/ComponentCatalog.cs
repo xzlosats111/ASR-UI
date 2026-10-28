@@ -72,7 +72,7 @@ internal static class ComponentCatalog
         "ffmpeg",
         "FFmpeg LGPL 媒体转换器",
         "约 170 MiB",
-        "把视频、FLV 和不兼容音频先转为临时 16 kHz 单声道 WAV，再交给新识别引擎。WhisperDesktop v3 也会使用同目录的 FFmpeg 做 FLV 回退。",
+        "FFmpeg 把视频、FLV 和不兼容音频先转为临时 16 kHz 单声道 WAV；同包的 ffprobe 会读取音轨语言标记，自动优先选择日语音轨。WhisperDesktop v3 也会使用同目录的 FFmpeg 做 FLV 回退。", 
         "BtbN FFmpeg Builds，Windows x64 LGPL 最新包",
         "LGPL；解压包中附带的许可证文件必须保留。",
         "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip",

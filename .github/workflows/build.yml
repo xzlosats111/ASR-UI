@@ -93,8 +93,11 @@ jobs:
           Invoke-WebRequest -Uri 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip' -OutFile $ffmpegZip
           Expand-Archive -LiteralPath $ffmpegZip -DestinationPath $ffmpegExtract -Force
           $ffmpeg = Get-ChildItem -Path $ffmpegExtract -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
+          $ffprobe = Get-ChildItem -Path $ffmpegExtract -Recurse -Filter 'ffprobe.exe' | Select-Object -First 1
           if( $null -eq $ffmpeg ) { throw 'ffmpeg.exe not found in the downloaded FFmpeg archive' }
+          if( $null -eq $ffprobe ) { throw 'ffprobe.exe not found in the downloaded FFmpeg archive' }
           Copy-Item $ffmpeg.FullName "$out\ffmpeg.exe"
+          Copy-Item $ffprobe.FullName "$out\ffprobe.exe"
           $ffmpegLicense = Get-ChildItem -Path $ffmpegExtract -Recurse -File | Where-Object { $_.Name -match '^(LICENSE|COPYING)' } | Select-Object -First 1
           if( $null -ne $ffmpegLicense ) { Copy-Item $ffmpegLicense.FullName "$out\FFmpeg-LICENSE.txt" }
 

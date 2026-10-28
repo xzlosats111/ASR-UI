@@ -30,6 +30,8 @@ internal sealed class MainForm : Form
 
     private readonly ListBox _inputFiles = new() { HorizontalScrollbar = true };
     private readonly ComboBox _preset = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly ComboBox _audioTrack = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly CheckBox _translationPrioritySegmentation = new() { Text = "翻译优先：合并短停顿，增强上下文" };
     private readonly RadioButton _sourceOutput = new() { Text = "输出到每个源文件同目录" };
     private readonly RadioButton _customOutput = new() { Text = "统一输出到指定文件夹" };
     private readonly TextBox _outputFolder = new();
@@ -43,6 +45,7 @@ internal sealed class MainForm : Form
     private double? _activeDurationSeconds;
     private static readonly Regex FfmpegDurationPattern = new(@"Duration:\s*(?<time>\d{2}:\d{2}:\d{2}(?:\.\d+)?)", RegexOptions.Compiled);
     private static readonly Regex FfmpegTimePattern = new(@"time=(?<time>\d{2}:\d{2}:\d{2}(?:\.\d+)?)", RegexOptions.Compiled);
+    private static readonly Regex CrispSliceProgressPattern = new(@"^crispasr:\s+progress\s*=\s*(?<percent>\d+)%\s*\((?<done>\d+)/(?<total>\d+)\s+slices\)", RegexOptions.Compiled);
     private static readonly Regex SrtTimestampPattern = new(@"\[\d{2}:\d{2}:\d{2}(?:\.\d+)?\s*-->\s*(?<time>\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]", RegexOptions.Compiled);
 
     private readonly CheckedListBox _components = new() { CheckOnClick = true };
@@ -61,7 +64,7 @@ internal sealed class MainForm : Form
         _settings = settings;
         AppPaths.ConfigureModelDirectory(_settings.ModelDirectory);
         AppPaths.EnsureDirectories();
-        Text = "ASR-UI v0.1.4 · 日语字幕工作台";
+        Text = "ASR-UI v0.1.5 · 日语字幕工作台";
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(1180, 820);
         Size = new Size(1280, 900);
@@ -80,7 +83,7 @@ internal sealed class MainForm : Form
         ShowPage("subtitle");
 
         Shown += (_, _) => EnsureComponentListFitsScreen();
-        AppendLog("ASR-UI v0.1.4 已启动。首次使用请先打开“组件与下载”下载默认勾选项目。");
+        AppendLog("ASR-UI v0.1.5 已启动。首次使用请先打开“组件与下载”下载默认勾选项目。");
         AppendLog($"工作目录：{AppPaths.BaseDirectory}");
         AppendLog($"模型目录：{AppPaths.ModelDirectory}");
     }
@@ -169,7 +172,7 @@ internal sealed class MainForm : Form
     {
         var root = new TableLayoutPanel { ColumnCount = 1, RowCount = 5, Dock = DockStyle.Fill, BackColor = _pageColor };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 70));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 104));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));
@@ -187,15 +190,24 @@ internal sealed class MainForm : Form
         _preset.SelectedIndex = 0;
         _preset.Location = new Point(110, 18);
         _preset.Width = 490;
-        var modeHint = new Label { Text = "建议先对同一短片分别跑一次，然后比较两份 SRT。", ForeColor = Color.DimGray, AutoSize = true, Location = new Point(620, 22) };
-        presetCard.Controls.AddRange(new Control[] { presetLabel, _preset, modeHint });
+        var modeHint = new Label { Text = "Qwen 适合交给整份 SRT 的机器翻译 / 大模型继续处理。", ForeColor = Color.DimGray, AutoSize = true, Location = new Point(620, 22) };
+        var audioTrackLabel = new Label { Text = "音轨", AutoSize = true, Location = new Point(20, 62), Font = BoldFont(10F) };
+        _audioTrack.Items.Add("自动优先日语音轨（推荐）");
+        _audioTrack.SelectedIndex = 0;
+        _audioTrack.Location = new Point(110, 58);
+        _audioTrack.Width = 420;
+        _translationPrioritySegmentation.Checked = _settings.TranslationPrioritySegmentation;
+        _translationPrioritySegmentation.AutoSize = true;
+        _translationPrioritySegmentation.Location = new Point(555, 61);
+        var segmentationHint = new Label { Text = "保留现有平衡策略时取消勾选。", ForeColor = Color.DimGray, AutoSize = true, Location = new Point(555, 82) };
+        presetCard.Controls.AddRange(new Control[] { presetLabel, _preset, modeHint, audioTrackLabel, _audioTrack, _translationPrioritySegmentation, segmentationHint });
         root.Controls.Add(presetCard, 0, 1);
 
         var fileCard = Card();
         var choose = PrimaryButton("选择视频 / 音频（可 Ctrl / Shift 多选）");
         choose.Location = new Point(18, 16);
         choose.Width = 290;
-        choose.Click += (_, _) => ChooseInputFiles();
+        choose.Click += async (_, _) => await ChooseInputFilesAsync();
         var clear = SecondaryButton("清空列表");
         clear.Location = new Point(322, 16);
         clear.Click += (_, _) => _inputFiles.Items.Clear();
@@ -379,7 +391,7 @@ internal sealed class MainForm : Form
     };
     private Font BoldFont(float size) => new("Microsoft YaHei UI", size, FontStyle.Bold);
 
-    private void ChooseInputFiles()
+    private async Task ChooseInputFilesAsync()
     {
         using var dialog = new OpenFileDialog
         {
@@ -390,8 +402,71 @@ internal sealed class MainForm : Form
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         _inputFiles.Items.Clear();
         _inputFiles.Items.AddRange(dialog.FileNames);
-        _subtitleStatus.Text = $"已选择 {dialog.FileNames.Length} 个文件。";
+        _subtitleStatus.Text = $"已选择 {dialog.FileNames.Length} 个文件。正在读取首个文件的音轨…";
         AppendLog($"已选择 {dialog.FileNames.Length} 个输入文件。");
+        await PopulateAudioTrackChoicesAsync(dialog.FileNames[0]);
+    }
+
+    private async Task PopulateAudioTrackChoicesAsync(string input)
+    {
+        _audioTrack.Items.Clear();
+        _audioTrack.Items.Add("自动优先日语音轨（推荐）");
+        _audioTrack.SelectedIndex = 0;
+        var ffprobe = AppPaths.FindFfprobe();
+        if (ffprobe is null)
+        {
+            _subtitleStatus.Text = "已选择输入文件；未找到 ffprobe.exe，将使用 FFmpeg 默认音轨。新发布包会包含 ffprobe。";
+            AppendLog("未找到 ffprobe.exe：音轨下拉框仅保留自动模式；本次将交由 FFmpeg 选择默认音轨。");
+            return;
+        }
+
+        try
+        {
+            var tracks = await new MediaProbeService().ProbeAudioTracksAsync(ffprobe, input);
+            foreach (var track in tracks) _audioTrack.Items.Add(track.DisplayName);
+            var requestedIndex = _settings.AudioTrackOrdinal + 1;
+            _audioTrack.SelectedIndex = requestedIndex >= 0 && requestedIndex < _audioTrack.Items.Count ? requestedIndex : 0;
+            _subtitleStatus.Text = tracks.Count == 0
+                ? "未读到音轨，将由 FFmpeg 尝试使用默认音频流。"
+                : $"已选择输入文件；检测到 {tracks.Count} 条音轨。默认将自动优先选择日语音轨。";
+            AppendLog(tracks.Count == 0 ? "ffprobe 未读到音轨，将交由 FFmpeg 处理。" : $"首个文件检测到 {tracks.Count} 条音轨；可在“音轨”下拉框中选择。"
+            );
+        }
+        catch (Exception ex)
+        {
+            _subtitleStatus.Text = "音轨读取失败，将交由 FFmpeg 使用默认音轨。";
+            AppendLog("ffprobe 读取音轨失败，将使用 FFmpeg 默认音轨：" + ex.Message);
+        }
+    }
+
+    private async Task<AudioTrackInfo?> ResolveAudioTrackAsync(string input)
+    {
+        var ffprobe = AppPaths.FindFfprobe();
+        if (ffprobe is null)
+        {
+            AppendLog("未找到 ffprobe.exe，FFmpeg 将使用默认音轨。");
+            return null;
+        }
+
+        try
+        {
+            var tracks = await new MediaProbeService().ProbeAudioTracksAsync(ffprobe, input);
+            var requestedOrdinal = _audioTrack.SelectedIndex - 1;
+            var track = MediaProbeService.ChooseTrack(tracks, requestedOrdinal);
+            if (track is null && requestedOrdinal >= 0)
+            {
+                AppendLog($"当前文件没有第 {requestedOrdinal + 1} 条音轨，已回退为自动优先日语音轨。");
+                track = MediaProbeService.ChooseTrack(tracks, -1);
+            }
+            if (track is not null) AppendLog("已选音轨：" + track.DisplayName);
+            else AppendLog("未读到可用音轨，FFmpeg 将尝试默认映射。");
+            return track;
+        }
+        catch (Exception ex)
+        {
+            AppendLog("ffprobe 读取当前文件音轨失败，FFmpeg 将使用默认音轨：" + ex.Message);
+            return null;
+        }
     }
 
     private void ChooseOutputFolder()
@@ -595,7 +670,7 @@ internal sealed class MainForm : Form
         if (!ApplyModelDirectory()) return;
         SaveSettings();
         _startButton.Enabled = false;
-        _subtitleStatus.Text = "任务正在运行；下方进度依据 FFmpeg 时间和识别到的字幕时间实时更新。";
+        _subtitleStatus.Text = "任务正在运行；识别阶段会显示 CrispASR 实际完成的语音片段 / 总片段数。";
         BeginBatchProgress(files.Length);
         var successful = 0;
         var failures = new List<string>();
@@ -640,8 +715,16 @@ internal sealed class MainForm : Form
         try
         {
             AppendLog($"========== 开始：{input} ==========");
-            SetFileProgress(0, "正在用 FFmpeg 转换音频");
-            await RunProcessAsync(ffmpeg, new[] { "-hide_banner", "-nostdin", "-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", tempWav }, null, ProcessProgressStage.AudioConversion);
+            SetFileProgress(0, "正在读取音轨并用 FFmpeg 转换音频");
+            var audioTrack = await ResolveAudioTrackAsync(input);
+            var ffmpegArguments = new List<string> { "-hide_banner", "-nostdin", "-y", "-i", input };
+            if (audioTrack is not null)
+            {
+                ffmpegArguments.Add("-map");
+                ffmpegArguments.Add($"0:{audioTrack.StreamIndex}");
+            }
+            ffmpegArguments.AddRange(new[] { "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", tempWav });
+            await RunProcessAsync(ffmpeg, ffmpegArguments, null, ProcessProgressStage.AudioConversion);
             if (!File.Exists(tempWav)) throw new InvalidDataException("FFmpeg 没有生成临时 WAV 文件。");
 
             var outputDirectory = _sourceOutput.Checked ? Path.GetDirectoryName(input)! : _outputFolder.Text.Trim();
@@ -667,13 +750,38 @@ internal sealed class MainForm : Form
             AppendLog($"字幕目标：{requestedSrt}");
             AppendLog($"识别临时输出：{stagingSrt}（完成后将自动复制到字幕目标，以兼容中文/日文路径）");
 
-            var arguments = isQwen
-                ? new[] { "--backend", "qwen3", "-m", qwenModel.TargetPath, "-am", ComponentCatalog.QwenAlignerQ4.TargetPath, "--gpu-backend", "cuda", "-f", tempWav, "-l", "ja", "--vad", "--split-on-punct", "-osrt", "-of", stagingBaseName }
-                : new[] { "--backend", "parakeet", "-m", ComponentCatalog.ParakeetJaQ8.TargetPath, "--gpu-backend", "cuda", "-f", tempWav, "-l", "ja", "--vad", "--split-on-punct", "--parakeet-decoder", "ctc", "-osrt", "-of", stagingBaseName };
-            SetFileProgress(8, "正在加载模型、VAD 并识别");
+            var arguments = new List<string>();
+            if (isQwen)
+                arguments.AddRange(new[] { "--backend", "qwen3", "-m", qwenModel.TargetPath, "-am", ComponentCatalog.QwenAlignerQ4.TargetPath });
+            else
+                arguments.AddRange(new[] { "--backend", "parakeet", "-m", ComponentCatalog.ParakeetJaQ8.TargetPath, "--parakeet-decoder", "ctc" });
+            arguments.AddRange(new[] { "--gpu-backend", "cuda", "-f", tempWav, "-l", "ja", "--vad" });
+            if (_translationPrioritySegmentation.Checked)
+            {
+                arguments.AddRange(new[] { "-vsd", "300", "-vp", "100" });
+                AppendLog("翻译优先分段已启用：合并 300 ms 内短停顿，并保留片段前后各 100 ms 音频。");
+            }
+            else
+            {
+                AppendLog("使用平衡分段：CrispASR 默认 VAD 停顿和留白参数。");
+            }
+            // -pp is CrispASR's real per-VAD-slice decode/alignment progress, not a guessed timer.
+            arguments.AddRange(new[] { "--split-on-punct", "-pp", "-osrt", "-of", stagingBaseName });
+            SetFileProgressIndeterminate("正在加载模型、执行 VAD 并准备识别");
             await RunProcessAsync(crisp, arguments, BuildEngineEnvironment(), ProcessProgressStage.Recognition);
             if (!File.Exists(stagingSrt)) throw new InvalidDataException($"识别引擎已结束，但没有生成临时字幕：{stagingSrt}");
-            SetFileProgress(98, "正在保存字幕到所选输出位置");
+            SetFileProgress(98, "正在自动清理零时长、轻微重叠和异常超长时间轴");
+            try
+            {
+                var repair = SubtitleTimelineRepair.RepairFile(stagingSrt);
+                AppendLog(repair.Summary);
+            }
+            catch (Exception ex)
+            {
+                // A valid engine SRT is still more useful than failing the whole file because an optional cleanup failed.
+                AppendLog("时间轴自动清理失败，保留 CrispASR 原始 SRT：" + ex.Message);
+            }
+            SetFileProgress(99, "正在保存字幕到所选输出位置");
             File.Copy(stagingSrt, requestedSrt, true);
             File.Delete(stagingSrt);
             AppendLog($"完成：{requestedSrt}");
@@ -726,8 +834,16 @@ internal sealed class MainForm : Form
         _lastFileProgress = Math.Max(_lastFileProgress, filePercent);
         var overall = Math.Clamp((int)Math.Round((_batchFileIndex * 100d + _lastFileProgress) / _batchFileCount), 0, 100);
         _subtitleProgress.Style = ProgressBarStyle.Continuous;
+        _subtitleProgress.MarqueeAnimationSpeed = 0;
         _subtitleProgress.Value = overall;
         _subtitleProgressStatus.Text = $"第 {_batchFileIndex + 1}/{_batchFileCount} 个 · {status} · 总进度 {overall}%";
+    }
+
+    private void SetFileProgressIndeterminate(string status)
+    {
+        _subtitleProgress.Style = ProgressBarStyle.Marquee;
+        _subtitleProgress.MarqueeAnimationSpeed = 28;
+        _subtitleProgressStatus.Text = $"第 {_batchFileIndex + 1}/{_batchFileCount} 个 · {status}";
     }
 
     private void ObserveProcessProgress(string line, ProcessProgressStage stage)
@@ -758,21 +874,38 @@ internal sealed class MainForm : Form
             return;
         }
 
+        var sliceProgress = CrispSliceProgressPattern.Match(line);
+        if (sliceProgress.Success
+            && int.TryParse(sliceProgress.Groups["percent"].Value, out var enginePercent)
+            && int.TryParse(sliceProgress.Groups["done"].Value, out var slicesDone)
+            && int.TryParse(sliceProgress.Groups["total"].Value, out var slicesTotal)
+            && slicesTotal > 0)
+        {
+            // CrispASR emits this only after each VAD slice has completed decoding and, for Qwen,
+            // its requested forced alignment. Map the actual engine 0-100% into the recognition area.
+            var fileProgress = 8 + (int)Math.Round(Math.Clamp(enginePercent, 0, 100) * 0.90d);
+            SetFileProgress(fileProgress, $"识别与对齐：{slicesDone}/{slicesTotal} 个语音片段（引擎 {enginePercent}%）");
+            return;
+        }
+
         if (line.Contains("loaded ", StringComparison.OrdinalIgnoreCase))
         {
-            SetFileProgress(10, "模型已加载，正在进行 VAD 和识别");
+            SetFileProgressIndeterminate("模型已加载，正在进行 VAD 分段");
+        }
+        else if (line.Contains("Final speech segments after filtering:", StringComparison.OrdinalIgnoreCase))
+        {
+            var count = line[(line.LastIndexOf(':') + 1)..].Trim();
+            SetFileProgressIndeterminate($"VAD 已找到 {count} 个语音片段，正在开始识别");
         }
         else if (line.Contains("detecting speech", StringComparison.OrdinalIgnoreCase))
         {
-            SetFileProgress(12, "正在检测语音片段");
-        }
-        else if (line.Contains("[aligner]", StringComparison.OrdinalIgnoreCase))
-        {
-            SetFileProgress(94, "正在强制对齐和整理时间轴");
+            SetFileProgressIndeterminate("正在检测语音片段");
         }
 
+        // Fallback for an unusual CrispASR build that does not emit -pp. The normal v0.8.45
+        // route returns above and therefore never relies on delayed transcript printing.
         var timestampMatch = SrtTimestampPattern.Match(line);
-        if (timestampMatch.Success && _activeDurationSeconds is > 0 && TryParseTimestamp(timestampMatch.Groups["time"].Value, out var recognized))
+        if (_lastFileProgress < 20 && timestampMatch.Success && _activeDurationSeconds is > 0 && TryParseTimestamp(timestampMatch.Groups["time"].Value, out var recognized))
         {
             var ratio = Math.Clamp(recognized.TotalSeconds / _activeDurationSeconds.Value, 0d, 1d);
             var progress = 12 + (int)Math.Round(ratio * 84d);
@@ -849,6 +982,8 @@ internal sealed class MainForm : Form
         _settings.ProxyUrl = _proxyUrl.Text.Trim();
         _settings.OutputBesideSource = _sourceOutput.Checked;
         _settings.OutputFolder = _outputFolder.Text.Trim();
+        _settings.AudioTrackOrdinal = _audioTrack.SelectedIndex - 1;
+        _settings.TranslationPrioritySegmentation = _translationPrioritySegmentation.Checked;
         _settings.ModelDirectory = AppPaths.ModelDirectory;
         _settings.Save();
     }

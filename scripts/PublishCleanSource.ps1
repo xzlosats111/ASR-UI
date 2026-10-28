@@ -72,7 +72,7 @@ if ($remaining.Count -eq 0) {
 Write-Host ''
 Write-Host 'Committing clean source update:'
 $remaining | ForEach-Object { Write-Host "  $_" }
-Invoke-Git commit -m 'Update ASR-UI v0.1.4 Unicode SRT output and progress'
+Invoke-Git commit -m 'Update ASR-UI v0.1.5 audio tracks, real progress and timeline repair'
 Invoke-Git branch -M main
 Write-Host ''
 Write-Host 'Pushing main...'

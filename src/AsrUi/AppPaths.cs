@@ -38,6 +38,12 @@ internal static class AppPaths
         return File.Exists(bundled) ? bundled : FindFile(RuntimeDirectory, "ffmpeg.exe");
     }
 
+    public static string? FindFfprobe()
+    {
+        var bundled = Path.Combine(BaseDirectory, "ffprobe.exe");
+        return File.Exists(bundled) ? bundled : FindFile(RuntimeDirectory, "ffprobe.exe");
+    }
+
     public static string? FindLegacyWhisperDesktop()
     {
         var direct = Path.Combine(BaseDirectory, "WhisperDesktop.exe");
@@ -62,6 +68,9 @@ internal sealed class AppSettings
     public string ProxyUrl { get; set; } = "http://127.0.0.1:10809";
     public bool OutputBesideSource { get; set; } = true;
     public string OutputFolder { get; set; } = string.Empty;
+    // -1 means automatic Japanese/default/first-audio selection; 0+ is the audio ordinal selected by the user.
+    public int AudioTrackOrdinal { get; set; } = -1;
+    public bool TranslationPrioritySegmentation { get; set; } = true;
     public string ModelDirectory { get; set; } = string.Empty;
 
     public static AppSettings Load()
