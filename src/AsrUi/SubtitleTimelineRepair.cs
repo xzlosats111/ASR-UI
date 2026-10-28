@@ -82,7 +82,8 @@ internal static class SubtitleTimelineRepair
 
             cue.Start = previous is not null && previous.End > cue.Start ? previous.End : cue.Start;
             var maximumEnd = next?.Start ?? cue.Start + MinimumCueLength;
-            cue.End = Math.Min(cue.Start + MinimumCueLength, maximumEnd);
+            var preferredEnd = cue.Start + MinimumCueLength;
+            cue.End = preferredEnd <= maximumEnd ? preferredEnd : maximumEnd;
             if (cue.End <= cue.Start)
             {
                 cue.End = cue.Start + TimeSpan.FromMilliseconds(120);

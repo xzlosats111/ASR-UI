@@ -83,7 +83,7 @@ internal sealed class MainForm : Form
         ShowPage("subtitle");
 
         Shown += (_, _) => EnsureComponentListFitsScreen();
-        AppendLog("ASR-UI v0.1.5 已启动。首次使用请先打开“组件与下载”下载默认勾选项目。");
+        AppendLog("ASR-UI v0.1.6 已启动。首次使用请先打开“组件与下载”下载默认勾选项目。");
         AppendLog($"工作目录：{AppPaths.BaseDirectory}");
         AppendLog($"模型目录：{AppPaths.ModelDirectory}");
     }
